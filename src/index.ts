@@ -11,7 +11,7 @@ export { RateLimiter } from "./ratelimit";
 export interface HandlerOptions {
   /** Defaults to the SMTP mailer. Tests inject a fake. */
   mailerFactory?: MailerFactory;
-  /** Durable Object name of the global bucket. Defaults to "global". */
+  /** Durable Object name of the global rate limiter. Defaults to "global". */
   limiterName?: string;
 }
 

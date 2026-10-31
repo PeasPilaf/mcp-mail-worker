@@ -1,30 +1,25 @@
-// One global token bucket, held by a single Durable Object instance.
+// One global flat sliding-window limiter, held by a single Durable Object instance.
 
 import { DurableObject } from "cloudflare:workers";
 
-export interface BucketState {
-  tokens: number;
-  updatedMs: number;
-}
-
-/** Pure token-bucket step: capacity = perMinute, refill perMinute per 60 s. */
-export function takeToken(
-  state: BucketState | undefined,
+/** Pure sliding-window step: at most perMinute allowed in any 60 s. `sent` = live stamps, ascending. */
+export function takeSlot(
+  sent: number[] | undefined,
   perMinute: number,
   nowMs: number,
-): { allowed: boolean; state: BucketState } {
-  const elapsed = state ? Math.max(0, nowMs - state.updatedMs) : 0;
-  const available = state ? Math.min(perMinute, state.tokens + (elapsed * perMinute) / 60_000) : perMinute;
-  const allowed = available >= 1;
-  return { allowed, state: { tokens: allowed ? available - 1 : available, updatedMs: nowMs } };
+): { allowed: boolean; sent: number[] } {
+  const live = (sent ?? []).filter((t) => t > nowMs - 60_000);
+  const allowed = live.length < perMinute;
+  if (allowed) live.push(nowMs);
+  return { allowed, sent: live };
 }
 
 export class RateLimiter extends DurableObject {
-  /** Atomically take one token; false if the bucket is empty. */
+  /** Atomically take one slot; false if the window is full. */
   async take(perMinute: number): Promise<boolean> {
-    const current = await this.ctx.storage.get<BucketState>("bucket");
-    const { allowed, state } = takeToken(current, perMinute, Date.now());
-    await this.ctx.storage.put("bucket", state);
+    const current = await this.ctx.storage.get<number[]>("window");
+    const { allowed, sent } = takeSlot(current, perMinute, Date.now());
+    await this.ctx.storage.put("window", sent);
     return allowed;
   }
 }

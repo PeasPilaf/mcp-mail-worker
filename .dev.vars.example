@@ -18,6 +18,8 @@ SMTP_PASSWORD=replace-with-app-specific-password
 SMTP_FROM=Mail Relay <sender@example.com>
 
 EMAIL_PER_MIN=5
+# Optional; per-connection cap on top of EMAIL_PER_MIN. Absent means none.
+CLIENT_EMAIL_PER_MIN=3
 # Comma-separated bare addresses.
 MAIL_ALLOW_TO=alice@example.com,inbox@example.net
 # Optional; must be on MAIL_ALLOW_TO. Defaults to the first entry.

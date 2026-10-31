@@ -24,6 +24,8 @@
 // | MAIL_ALLOW_TO       | yes      | comma-separated BARE addresses, non-empty                   |
 // | MAIL_DEFAULT_TO     | no       | must be on the allowlist; default = first entry             |
 // | MAX_BODY_BYTES      | no       | integer >= 0; absent = no cap                               |
+// | CLIENT_EMAIL_PER_MIN| no       | integer > 0; per-connection cap ON TOP of EMAIL_PER_MIN;     |
+//                                  absent = no per-connection cap (`clientEmailPerMin: null`)
 // | OAUTH_REDIRECT_URIS | no       | comma list of https URLs; default = vendor.example/vendor.example     |
 // | EMAIL_BATCHING      | no       | RESERVED: read, never validated, never acted on             |
 //
@@ -122,6 +124,8 @@ describe("happy path", () => {
   it("max body bytes and redirect uris", () => {
     expect(parseConfig(varsWith({ MAX_BODY_BYTES: "1024" })).maxBodyBytes).toBe(1024);
     expect(parseConfig(varsWith({ MAX_BODY_BYTES: "0" })).maxBodyBytes).toBe(0);
+    expect(parseConfig(baseVars()).clientEmailPerMin).toBeNull();
+    expect(parseConfig(varsWith({ CLIENT_EMAIL_PER_MIN: "4" })).clientEmailPerMin).toBe(4);
     expect(parseConfig(varsWith({ OAUTH_REDIRECT_URIS: " https://a.example/cb , http://localhost:9999/cb ," })).oauthRedirectUris)
       .toEqual(["https://a.example/cb", "http://localhost:9999/cb"]);
   });
@@ -167,6 +171,7 @@ describe("loud failures", () => {
     // Cloudflare blocks outbound port 25; only the two TLS submission ports.
     for (const bad of ["25", "2525", "abc", "70000"]) expect(err(varsWith({ SMTP_PORT: bad })).key).toBe("SMTP_PORT");
     for (const bad of ["lots", "-1", "1.5"]) expect(err(varsWith({ MAX_BODY_BYTES: bad })).key).toBe("MAX_BODY_BYTES");
+    for (const bad of ["0", "-1", "abc", "1.5"]) expect(err(varsWith({ CLIENT_EMAIL_PER_MIN: bad })).key).toBe("CLIENT_EMAIL_PER_MIN");
   });
 
   it("public url must be an https origin", () => {

@@ -69,6 +69,7 @@ variables, because `wrangler deploy` replaces plain-text variables with the
 | `SMTP_PASSWORD` | yes | A the mail provider **app-specific password** (the mail provider Accounts → Security → App passwords), not your login password. |
 | `SMTP_FROM` | no | Sender, e.g. `the model <you@yourdomain>`. Defaults to `SMTP_USERNAME`. the mail provider requires it to be your address or an alias. |
 | `EMAIL_PER_MIN` | yes | Bucket size and refill rate per minute (> 0). |
+| `CLIENT_EMAIL_PER_MIN` | no | Per-connection cap (see [Connections](#connections)), on top of `EMAIL_PER_MIN`. Unset = no per-connection cap. |
 | `MAIL_ALLOW_TO` | yes | Comma-separated bare addresses the model may email. |
 | `MAIL_DEFAULT_TO` | no | Where everything else goes. Must be on the allowlist; defaults to its first entry. |
 | `MAX_BODY_BYTES` | no | Body size cap in bytes. Unset = no cap. |
@@ -99,8 +100,24 @@ every connected client has to sign in again.
 Sign-in attempts and OAuth client registrations are each limited to 10 in
 any 60 seconds; extra requests get `429`.
 
-Several the model accounts can connect: each signs in once with the same
-token. They all share the one email limit and allowlist.
+## Connections
+
+Several the model accounts can connect. Each one signs in once with the same
+token and picks a **label**, such as `personal` or `work` (lowercase
+letters, digits and `-`, up to 32 characters). the model Code and API clients
+using the bearer token count as `bearer`, and connections made before
+labels existed count as `operator`.
+
+- Every email carries an `X-MCP-Client: <label>` header.
+- With `CLIENT_EMAIL_PER_MIN` set, each label also gets its own limit, on
+  top of the shared `EMAIL_PER_MIN`.
+- `npm run clients` lists labels and how many connections each has, and
+  `npm run clients -- revoke work` disconnects every `work` connection. It
+  runs on your machine with `wrangler login`, like `rotate-token`.
+
+Labels are self-declared: anyone with the token can pick any label. They
+show who sent what between connections you trust, not a security boundary.
+To cut off everyone, run `rotate-token`.
 
 ## Deploy (one button)
 

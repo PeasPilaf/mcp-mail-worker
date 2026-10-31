@@ -17,6 +17,8 @@ export interface ToolDeps {
   take: () => Promise<boolean>;
   /** Cloudflare colo serving the request, if known. */
   colo: string | null;
+  /** Label of the connection, sent as X-MCP-Client. */
+  client: string;
 }
 
 const INVALID_REQUEST = -32600;
@@ -54,7 +56,7 @@ const rpcError = (code: number, message: string) => Object.assign(new Error(mess
 const text = (t: string) => ({ content: [{ type: "text" as const, text: t }] });
 
 export function createMcpServer(deps: ToolDeps): Server {
-  const { cfg, mailer, take, colo } = deps;
+  const { cfg, mailer, take, colo, client } = deps;
   const server = new Server({ name: "mail", version: "1.0.0" }, { capabilities: { tools: {} } });
 
   server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: TOOLS }));
@@ -73,7 +75,7 @@ export function createMcpServer(deps: ToolDeps): Server {
       throw rpcError(INVALID_REQUEST, "message body exceeds size limit");
     }
     try {
-      await mailer.send(buildEmail(cfg, to, subject, body));
+      await mailer.send(buildEmail(cfg, to, subject, body, client));
     } catch (e) {
       throw rpcError(INTERNAL_ERROR, redactConfigValues(cfg, e instanceof Error ? e.message : String(e)));
     }

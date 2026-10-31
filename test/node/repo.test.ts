@@ -43,7 +43,7 @@ const read = (p: string) => readFileSync(join(root, p), "utf8");
 
 export const CONFIG_KEYS = [
   "MCP_AUTH_TOKEN_SHA256", "PUBLIC_URL", "SMTP_HOST", "SMTP_PORT", "SMTP_USERNAME", "SMTP_PASSWORD", "SMTP_FROM",
-  "EMAIL_PER_MIN", "MAIL_ALLOW_TO", "MAIL_DEFAULT_TO", "MAX_BODY_BYTES", "OAUTH_REDIRECT_URIS", "EMAIL_BATCHING",
+  "EMAIL_PER_MIN", "CLIENT_EMAIL_PER_MIN", "MAIL_ALLOW_TO", "MAIL_DEFAULT_TO", "MAX_BODY_BYTES", "OAUTH_REDIRECT_URIS", "EMAIL_BATCHING",
 ];
 
 /** Strip // and /* *\/ comments (outside strings) and trailing commas. */
@@ -73,7 +73,7 @@ describe("package.json", () => {
   it("depends on the Worker building blocks", () => {
     const pkg = JSON.parse(read("package.json"));
     for (const d of ["@cloudflare/workers-oauth-provider", "@modelcontextprotocol/sdk", "worker-mailer"]) expect(pkg.dependencies[d], d).toBeTruthy();
-    for (const s of ["test", "typecheck", "deploy", "rotate-token"]) expect(pkg.scripts[s], s).toBeTruthy();
+    for (const s of ["test", "typecheck", "deploy", "rotate-token", "clients"]) expect(pkg.scripts[s], s).toBeTruthy();
   });
 
   it("has no path from environment variables to Worker secrets", () => {
@@ -227,7 +227,7 @@ describe("README", () => {
   it("documents keys, secrets, deploy and connecting", () => {
     const lower = read("README.md").toLowerCase();
     for (const k of [...CONFIG_KEYS, "CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID"]) expect(lower, k).toContain(k.toLowerCase());
-    for (const n of ["rotate-token", "wrangler login", "wrangler secret put", "variables and secrets", "production", "not in github", "run workflow", "smtp", "app-specific password", "custom connector", "add the MCP server", "send_email", "ping", "durable object", "does not"]) {
+    for (const n of ["npm run clients", "x-mcp-client", "rotate-token", "wrangler login", "wrangler secret put", "variables and secrets", "production", "not in github", "run workflow", "smtp", "app-specific password", "custom connector", "add the MCP server", "send_email", "ping", "durable object", "does not"]) {
       expect(lower, n).toContain(n);
     }
   });

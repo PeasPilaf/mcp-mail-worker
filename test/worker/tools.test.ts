@@ -140,7 +140,7 @@ describe("send_email", () => {
     const w = worker();
     const body = "Hi Alice,\n\nNumbers: 1, 2, 3.\n.leading dot\nThanks";
     expectSent(await w.sendEmail(ALICE, "Status update", body));
-    expect(w.mailer.sent).toEqual([{ from: { address: FROM }, to: { address: ALICE }, subject: "Status update", text: body, headers: {} }]);
+    expect(w.mailer.sent).toEqual([{ from: { address: FROM }, to: { address: ALICE }, subject: "Status update", text: body, headers: { "X-MCP-Client": "bearer" } }]);
   });
 
   it("display name and casing are discarded on a hit", async () => {
@@ -157,7 +157,7 @@ describe("send_email", () => {
       const m = w.mailer.sent[i];
       expect(m.to).toEqual({ address: DEFAULT_TO });
       expect(m.subject).toBe("Totally normal");
-      expect(m.headers).toEqual({ "X-MCP-Redirected-To": to });
+      expect(m.headers).toEqual({ "X-MCP-Redirected-To": to, "X-MCP-Client": "bearer" });
       expect(m.text).toBe(redirectBody(to, "payload"));
     }
   });

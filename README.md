@@ -93,10 +93,15 @@ npm run rotate-token
 ```
 
 `rotate-token` runs on your machine. It generates 32 random bytes, uploads
-only their hash with `wrangler secret put MCP_AUTH_TOKEN_SHA256`, and then
-prints the token once. If the upload fails, it prints nothing. Run it again
-whenever you want a new token: the old one stops working immediately, and
-every connected client has to sign in again.
+only their hash with `wrangler secret put MCP_AUTH_TOKEN_SHA256`, then
+deletes every existing connection's OAuth KV records (`grant:` and `token:`)
+and prints the token once. Deleting the records makes each client
+re-authenticate instead of retrying with dead tokens the old secret issued.
+If the upload fails, it prints nothing. The cleanup is best-effort: the new
+token is already live, so if clearing the records fails the script warns and
+still prints the token — clean up with `npm run clients -- revoke <label>` or
+re-run it. Run it again whenever you want a new token: the old one stops
+working immediately, and every connected client has to sign in again.
 
 The token authorizes signing in and nothing else. It is not an MCP
 credential: `/mcp` accepts only a connection's own OAuth token, so this

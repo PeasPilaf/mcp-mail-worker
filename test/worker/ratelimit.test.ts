@@ -17,9 +17,9 @@
 //   not the old token bucket's "bucket" key, so leftover bucket state from
 //   an earlier deploy is ignored.
 // * The check is the FIRST step of send_email, before the body cap and
-//   recipient resolution: every attempt costs a token (allowlisted,
+//   recipient resolution: every attempt counts (allowlisted,
 //   redirected, unparseable, oversize, and attempts that later fail at
-//   SMTP). `ping` with `check_mail: true` also costs a token (it opens an
+//   SMTP). `ping` with `check_mail: true` also counts (it opens an
 //   SMTP connection); plain `ping` does not.
 // * Exhausted -> JSON-RPC error -32600 "email rate limit exceeded for this
 //   minute", nothing sent.
@@ -100,7 +100,7 @@ describe("through the tool", () => {
     expect(w.mailer.sent.map((m) => m.subject)).toEqual(["m0", "m1", "m2"]);
   });
 
-  it("redirected and unparseable sends spend the same bucket", async () => {
+  it("redirected and unparseable sends count against the same limit", async () => {
     const w = worker(varsWith({ EMAIL_PER_MIN: "2" }));
     expectSent(await w.sendEmail(OFF_LIST, "s", "b"));
     expectSent(await w.sendEmail("garbage", "s", "b"));
@@ -122,7 +122,7 @@ describe("through the tool", () => {
     expectRpcError(await w.sendEmail(ALICE, "s", "b"), INVALID_REQUEST, LIMIT);
   });
 
-  it("concurrent requests share one bucket", async () => {
+  it("concurrent requests share one limit", async () => {
     const w = worker(varsWith({ EMAIL_PER_MIN: "4" }));
     const results = await Promise.all(Array.from({ length: 10 }, (_, i) => w.sendEmail(ALICE, `c${i}`, "b")));
     expect(results.filter((r) => r.result).length).toBe(4);
@@ -130,8 +130,8 @@ describe("through the tool", () => {
     expect(w.mailer.sent).toHaveLength(4);
   });
 
-  it("separate handler instances with the same limiter name share the bucket", async () => {
-    // Models several isolates/colos: the bucket lives in the Durable
+  it("separate handler instances with the same limiter name share the limit", async () => {
+    // Models several isolates/colos: the window lives in the Durable
     // Object, not in handler memory.
     const name = crypto.randomUUID();
     const a = worker(varsWith({ EMAIL_PER_MIN: "1" }), { limiterName: name });
@@ -140,7 +140,7 @@ describe("through the tool", () => {
     expectRpcError(await b.sendEmail(ALICE, "s", "b"), INVALID_REQUEST, LIMIT);
   });
 
-  it("plain ping is free; ping with check_mail costs a token", async () => {
+  it("plain ping is free; ping with check_mail counts", async () => {
     const w = worker(varsWith({ EMAIL_PER_MIN: "1" }));
     for (let i = 0; i < 3; i++) expect((await w.ping()).error).toBeUndefined();
     expect((await w.ping({ check_mail: true })).error).toBeUndefined();

@@ -17,9 +17,11 @@ export interface HandlerOptions {
 
 type AppEnv = Env & { OAUTH_PROVIDER: OAuthHelpers };
 
-/** Grant props: a fingerprint of the stored token hash, so rotating the token revokes grants. */
+/** Grant props: a label and a fingerprint of the stored token hash, so rotating the token revokes grants. */
 interface Props {
   fp: string;
+  /** Connection label; absent on grants made before labels existed. */
+  label?: string;
 }
 
 const encoder = new TextEncoder();
@@ -27,6 +29,9 @@ const encoder = new TextEncoder();
 async function sha256(s: string): Promise<Uint8Array> {
   return new Uint8Array(await crypto.subtle.digest("SHA-256", encoder.encode(s)));
 }
+
+const LABEL_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
+const RESERVED_LABELS = ["bearer", "operator"];
 
 /** Sign-in / registration attempts allowed per minute, each. */
 export const AUTH_ATTEMPTS_PER_MIN = 10;
@@ -82,10 +87,14 @@ async function authorize(request: Request, env: AppEnv, cfg: Config): Promise<Re
     if (typeof given !== "string" || !(await tokenMatches(given, cfg.authTokenSha256))) {
       return page(401, "Sign in", "Incorrect token.");
     }
-    const props: Props = { fp: await fingerprint(cfg) };
+    const label = form?.get("label");
+    if (typeof label !== "string" || !LABEL_RE.test(label) || RESERVED_LABELS.includes(label)) {
+      return page(400, "Sign in", "Choose a label of 1-32 lowercase letters, digits or hyphens, starting with a letter or digit.");
+    }
+    const props: Props = { fp: await fingerprint(cfg), label };
     const { redirectTo } = await env.OAUTH_PROVIDER.completeAuthorization({
       request: authReq,
-      userId: "operator",
+      userId: label,
       metadata: {},
       scope: authReq.scope,
       props,
@@ -93,7 +102,7 @@ async function authorize(request: Request, env: AppEnv, cfg: Config): Promise<Re
     return new Response(null, { status: 302, headers: { location: redirectTo, "cache-control": "no-store" } });
   }
 
-  const form = `<form method="post"><label>Access token<input type="password" name="token" autocomplete="off" required autofocus></label><button type="submit">Authorize</button></form>`;
+  const form = `<form method="post"><label>Access token<input type="password" name="token" autocomplete="off" required autofocus></label><label>Label<input type="text" name="label" autocomplete="off" required maxlength="32" pattern="[a-z0-9][a-z0-9\-]{0,31}"></label><button type="submit">Authorize</button></form>`;
   return page(200, "Sign in", `Authorize <strong>${escapeHtml(client.clientName ?? "this client")}</strong> to use this server.`, form);
 }
 
@@ -106,10 +115,13 @@ export function createHandler(opts: HandlerOptions = {}): ExportedHandler<Env> {
       const cfg = parseConfig(env as unknown as Record<string, unknown>);
       if (ctx.props?.fp !== (await fingerprint(cfg))) return new Response(null, { status: 401 });
       const limiter = env.RATE_LIMITER.get(env.RATE_LIMITER.idFromName(limiterName));
+      const label = ctx.props.label ?? "operator";
+      const clientLimiter = cfg.clientEmailPerMin === null ? null : env.RATE_LIMITER.get(env.RATE_LIMITER.idFromName(`${limiterName}:client:${label}`));
       const server = createMcpServer({
         cfg,
         mailer: mailerFactory(cfg),
-        take: () => limiter.take(cfg.emailPerMin),
+        client: label,
+        take: async () => (clientLimiter === null || (await clientLimiter.take(cfg.clientEmailPerMin!))) && (await limiter.take(cfg.emailPerMin)),
         colo: (request as any).cf?.colo ?? null,
       });
       const transport = new WebStandardStreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
@@ -144,7 +156,7 @@ export function createHandler(opts: HandlerOptions = {}): ExportedHandler<Env> {
         resolveExternalToken: async ({ token, env }) => {
           const current = parseConfig(env as unknown as Record<string, unknown>);
           if (!(await tokenMatches(token, current.authTokenSha256))) return null;
-          const props: Props = { fp: await fingerprint(current) };
+          const props: Props = { fp: await fingerprint(current), label: "bearer" };
           return { props, audience: `${current.publicUrl}/mcp` };
         },
       });

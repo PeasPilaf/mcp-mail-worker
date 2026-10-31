@@ -18,6 +18,8 @@ export interface Config {
   smtpPassword: string;
   smtpFrom: Mailbox;
   emailPerMin: number;
+  /** Per-connection cap on top of emailPerMin; null = none. */
+  clientEmailPerMin: number | null;
   allowlist: Allowlist;
   defaultTo: Mailbox;
   maxBodyBytes: number | null;
@@ -154,6 +156,9 @@ export function parseConfig(env: Record<string, unknown>): Config {
 
   const emailPerMin = integer("EMAIL_PER_MIN", required(env, "EMAIL_PER_MIN"), 1);
 
+  const clientRaw = str(env, "CLIENT_EMAIL_PER_MIN");
+  const clientEmailPerMin = clientRaw === undefined ? null : integer("CLIENT_EMAIL_PER_MIN", clientRaw, 1);
+
   const addresses = required(env, "MAIL_ALLOW_TO").split(",").map((a) => a.trim()).filter(Boolean);
   if (!addresses.length) throw new ConfigError("MAIL_ALLOW_TO", "must list at least one address");
   const parsed = addresses.map((a) => parseAddress(a));
@@ -181,6 +186,7 @@ export function parseConfig(env: Record<string, unknown>): Config {
     smtpPassword,
     smtpFrom,
     emailPerMin,
+    clientEmailPerMin,
     allowlist,
     defaultTo,
     maxBodyBytes,

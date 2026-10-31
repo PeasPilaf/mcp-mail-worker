@@ -3,6 +3,7 @@
 import { parseMailbox, type Config, type Mailbox } from "./config";
 
 export const REDIRECT_HEADER = "X-MCP-Redirected-To";
+export const CLIENT_HEADER = "X-MCP-Client";
 export const REDIRECT_HEADER_MAX_BYTES = 256;
 
 export interface OutgoingEmail {
@@ -53,7 +54,7 @@ export function sanitizeRedirectHeader(raw: string): string {
   return out;
 }
 
-export function buildEmail(cfg: Config, to: string, subject: string, body: string): OutgoingEmail {
+export function buildEmail(cfg: Config, to: string, subject: string, body: string, client: string): OutgoingEmail {
   const r = resolveRecipient(cfg, to);
   const redirected = r.kind === "redirected";
   return {
@@ -61,7 +62,7 @@ export function buildEmail(cfg: Config, to: string, subject: string, body: strin
     to: r.to,
     subject: subject.replace(/[\r\n]/g, " "),
     text: redirected ? redirectBody(r.requested, body) : body,
-    headers: redirected ? { [REDIRECT_HEADER]: sanitizeRedirectHeader(r.requested) } : {},
+    headers: redirected ? { [REDIRECT_HEADER]: sanitizeRedirectHeader(r.requested), [CLIENT_HEADER]: client } : { [CLIENT_HEADER]: client },
   };
 }
 

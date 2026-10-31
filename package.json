@@ -8,6 +8,7 @@
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "rotate-token": "node scripts/rotate-token.mjs",
+    "clients": "node scripts/clients.mjs",
     "deploy": "wrangler deploy",
     "dev": "wrangler dev"
   },

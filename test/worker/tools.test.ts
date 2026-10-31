@@ -10,6 +10,7 @@
 //     Health check + timing. Both parameters optional. Result is ONE text
 //     content item whose text is a JSON object:
 //       { "status": "ok",
+//         "client": <the connection's label, i.e. the certified identity>,
 //         "server_time": <ISO-8601 UTC, the Worker's clock>,
 //         "colo": <Cloudflare colo code serving the request, or null>,
 //         "handler_ms": <ms spent in the handler, number >= 0>,
@@ -26,6 +27,11 @@
 // quota wording, no digits in descriptions, and no configured value
 // anywhere in initialize, tools/list or any tool result.
 //
+// Connections are labelled: send_email stamps `X-MCP-Client: <label>` on
+// every message and ping reports the same label as `client`. There is no
+// "bearer" connection any more (the static token path was removed), so a
+// label is always a real connection label chosen at sign-in.
+//
 // send_email success is byte-identical for allowlisted, off-list and
 // unparseable recipients (the "no oracle" invariant). Errors are JSON-RPC
 // errors:
@@ -37,7 +43,7 @@
 import { describe, expect, it } from "vitest";
 import { redirectBody } from "../../src/mail";
 import {
-  ALICE, BOB, DEFAULT_TO, FROM, INTERNAL_ERROR, INVALID_REQUEST, OFF_LIST, PER_MIN, SMTP_FAILURE,
+  ALICE, BOB, DEFAULT_TO, FROM, INTERNAL_ERROR, INVALID_REQUEST, OFF_LIST, PER_MIN, SMTP_FAILURE, TEST_LABEL,
   baseVars, expectNoSecrets, expectRpcError, expectSent, varsWith, worker,
 } from "./helpers";
 
@@ -140,7 +146,17 @@ describe("send_email", () => {
     const w = worker();
     const body = "Hi Alice,\n\nNumbers: 1, 2, 3.\n.leading dot\nThanks";
     expectSent(await w.sendEmail(ALICE, "Status update", body));
-    expect(w.mailer.sent).toEqual([{ from: { address: FROM }, to: { address: ALICE }, subject: "Status update", text: body, headers: { "X-MCP-Client": "bearer" } }]);
+    expect(w.mailer.sent).toEqual([{ from: { address: FROM }, to: { address: ALICE }, subject: "Status update", text: body, headers: { "X-MCP-Client": TEST_LABEL } }]);
+  });
+
+  it("names the connection that sent the mail, and never bearer", async () => {
+    const w = worker();
+    expectSent(await w.sendEmail(ALICE, "as default", "b"));
+    expectSent(await w.sendEmail(ALICE, "as work", "b", "work"));
+    expectSent(await w.sendEmail(OFF_LIST, "redirected", "b", "phone-2"));
+    expect(w.mailer.sent.map((m) => m.headers["X-MCP-Client"])).toEqual([TEST_LABEL, "work", "phone-2"]);
+    for (const m of w.mailer.sent) expect(m.headers["X-MCP-Client"]).not.toBe("bearer");
+    expect(JSON.stringify(w.mailer.sent)).not.toContain('"bearer"');
   });
 
   it("display name and casing are discarded on a hit", async () => {
@@ -157,7 +173,7 @@ describe("send_email", () => {
       const m = w.mailer.sent[i];
       expect(m.to).toEqual({ address: DEFAULT_TO });
       expect(m.subject).toBe("Totally normal");
-      expect(m.headers).toEqual({ "X-MCP-Redirected-To": to, "X-MCP-Client": "bearer" });
+      expect(m.headers).toEqual({ "X-MCP-Redirected-To": to, "X-MCP-Client": TEST_LABEL });
       expect(m.text).toBe(redirectBody(to, "payload"));
     }
   });
@@ -232,6 +248,7 @@ describe("ping", () => {
     const before = Date.now();
     const p = pingJson(await w.ping());
     expect(p.status).toBe("ok");
+    expect(p.client).toBe(TEST_LABEL);
     expect(Math.abs(Date.parse(p.server_time) - before)).toBeLessThan(60_000);
     expect(p.server_time).toMatch(/Z$/);
     expect(p.colo === null || typeof p.colo === "string").toBe(true);
@@ -239,8 +256,16 @@ describe("ping", () => {
     expect(p.handler_ms).toBeGreaterThanOrEqual(0);
     expect(p.received_after_ms).toBeNull();
     expect("mail" in p).toBe(false);
-    expect(Object.keys(p).sort()).toEqual(["colo", "handler_ms", "received_after_ms", "server_time", "status"]);
+    expect(Object.keys(p).sort()).toEqual(["client", "colo", "handler_ms", "received_after_ms", "server_time", "status"]);
     expect(w.mailer.verifies).toBe(0);
+  });
+
+  it("reports the connection label", async () => {
+    const w = worker();
+    expect(pingJson(await w.ping()).client).toBe(TEST_LABEL);
+    expect(pingJson(await w.ping({}, "work")).client).toBe("work");
+    expect(pingJson(await w.ping({ check_mail: true }, "phone-2")).client).toBe("phone-2");
+    expect(w.mailer.verifies).toBe(1);
   });
 
   it("computes received_after_ms from client_time", async () => {

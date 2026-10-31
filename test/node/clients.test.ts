@@ -15,7 +15,9 @@
 //   and `token:<label>:` key with ONE `kv bulk delete` call, then prints how
 //   many connections were revoked. Those clients must sign in again.
 //   - Unknown label (no grant keys) -> exit 1, nothing deleted.
-//   - "bearer" -> exit 1: the static token is revoked by rotate-token.
+//   - There is no "bearer" special case: the static bearer token path is
+//     gone, so "bearer" is an ordinary label like any other (usually with no
+//     connections, which is the unknown-label path).
 //   - Labels are matched exactly: revoking "work" never touches "work-2".
 // * Every `kv key` / `kv bulk` call passes `--remote` and
 //   `--namespace-id <id>`. Missing namespace -> exit 1.
@@ -98,14 +100,23 @@ describe("clients", () => {
     }
   });
 
-  it("refuses unknown labels and the bearer token", () => {
+  it("refuses labels with no connections, including the retired bearer label", () => {
     for (const label of ["nobody", "bearer", "wor"]) {
       const { run, keysNow, calls } = setup();
       const r = run("revoke", label);
       expect(r.code, label).toBe(1);
       expect(keysNow(), label).toEqual(KEYS);
       expect(calls().some((c) => c[1] === "bulk"), label).toBe(false);
+      expect(r.out, label).toContain(`No connections labelled "${label}".`);
     }
+  });
+
+  it("revokes a bearer-labelled connection like any other label", () => {
+    const keys = [...KEYS, "grant:bearer:g9", "token:bearer:g9:t9"];
+    const { run, keysNow } = setup(keys);
+    const r = run("revoke", "bearer");
+    expect(r.code, r.out).toBe(0);
+    expect(keysNow()).toEqual(KEYS);
   });
 
   it("fails without the OAuth namespace", () => {

@@ -41,10 +41,6 @@ if (action === undefined) {
   if (!counts.size) console.log("No connections.");
   for (const l of [...counts.keys()].sort()) console.log(`${l}  ${counts.get(l)} connection(s)`);
 } else if (action === "revoke" && label) {
-  if (label === "bearer") {
-    console.error("The bearer token is revoked by `npm run rotate-token`.");
-    process.exit(1);
-  }
   const grants = keys(`grant:${label}:`);
   if (!grants.length) {
     console.error(`No connections labelled "${label}".`);

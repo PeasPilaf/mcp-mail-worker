@@ -17,7 +17,7 @@ export interface ToolDeps {
   take: () => Promise<boolean>;
   /** Cloudflare colo serving the request, if known. */
   colo: string | null;
-  /** Label of the connection, sent as X-MCP-Client. */
+  /** Label of the connection: sent as X-MCP-Client and reported by ping. */
   client: string;
 }
 
@@ -85,7 +85,7 @@ export function createMcpServer(deps: ToolDeps): Server {
   async function ping(args: Record<string, unknown>) {
     const start = Date.now();
     const now = new Date();
-    const out: Record<string, unknown> = { status: "ok", server_time: now.toISOString(), colo };
+    const out: Record<string, unknown> = { status: "ok", client, server_time: now.toISOString(), colo };
     const clientMs = typeof args.client_time === "string" ? Date.parse(args.client_time) : NaN;
     let mail: { ok: boolean; ms: number } | undefined;
     if (args.check_mail === true) {

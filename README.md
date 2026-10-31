@@ -74,7 +74,7 @@ variables, because `wrangler deploy` replaces plain-text variables with the
 | `MAIL_ALLOW_TO` | yes | Comma-separated bare addresses the model may email. |
 | `MAIL_DEFAULT_TO` | no | Where everything else goes. Must be on the allowlist; defaults to its first entry. |
 | `MAX_BODY_BYTES` | no | Body size cap in bytes. Unset = no cap. |
-| `OAUTH_REDIRECT_URIS` | no | Redirect allowlist for the sign-in page: comma-separated https URLs or bare hostnames. Defaults to the vendor.example and vendor.example connector callbacks plus the bare host `vendor.example`. Loopback http is always allowed (see [Connect the model](#connect-model)). |
+| `OAUTH_REDIRECT_URIS` | no | Redirect allowlist for the sign-in page: comma-separated https URLs or bare hostnames. Defaults to the exact vendor.example, vendor.example and a hosted MCP client connector callbacks. Loopback http is always allowed (see [Connect the model](#connect-model)). |
 | `EMAIL_BATCHING` | no | Reserved. Read but ignored. |
 
 If a value is missing or invalid, every request gets an empty `500`, and
@@ -183,10 +183,12 @@ The sign-in page only redirects to an allowed callback, decided in two parts.
 port and path — are always allowed, which is how desktop tools like the model
 Code and MCP Inspector catch the code. **https** callbacks must match
 `OAUTH_REDIRECT_URIS`: by default the vendor.example callback, the vendor.example
-callback, and the bare host `vendor.example`. An entry is either a full URL,
-matched exactly, or a bare hostname, which matches any path on exactly that
-host (not its subdomains). Any other redirect is refused with a `400` and is
-never followed.
+callback, and the a hosted MCP client connector callback
+(`https://vendor.example/connector_platform_oauth_redirect`), all exact. An entry
+is either a full URL, matched exactly, or a bare hostname, which matches any
+path on exactly that host and its default port (not its subdomains). Prefer
+full URLs: a bare host trusts every page on that site. Any other redirect is
+refused with a `400` and is never followed.
 
 A client that can only send a fixed header token, with no interactive
 sign-in step, cannot connect.

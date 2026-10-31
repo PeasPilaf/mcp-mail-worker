@@ -334,9 +334,9 @@ describe("authorize page", () => {
     }
   });
 
-  it("allows the redirects the new rule permits: loopback and allowlisted bare hosts", async () => {
+  it("allows the redirects the rule permits: loopback and the default a hosted MCP client callback", async () => {
     const w = worker();
-    for (const redirect of ["http://localhost:33418/callback", "http://127.0.0.1:8976/oauth/done", "https://vendor.example/connector/oauth/callback"]) {
+    for (const redirect of ["http://localhost:33418/callback", "http://127.0.0.1:8976/oauth/done", "https://vendor.example/connector_platform_oauth_redirect"]) {
       const cid = await clientId(w, redirect);
       const r = await w.fetch(`/authorize?${await authorizeQuery(cid, redirect)}`);
       expect(r.status, redirect).toBe(200);

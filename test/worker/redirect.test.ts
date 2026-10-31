@@ -22,11 +22,13 @@
 
 import { describe, expect, it } from "vitest";
 import { redirectAllowed } from "../../src/index";
+import { DEFAULT_REDIRECT_URIS } from "../../src/config";
 
 const CLAUDE = "https://client.example.test/callback";
 const CLAUDE_COM = "https://secondary.example.test/callback";
-/** The production default, including the bare a hosted MCP client connector host. */
-const DEFAULT = [CLAUDE, CLAUDE_COM, "vendor.example"];
+const CHATGPT = "https://vendor.example/connector_platform_oauth_redirect";
+/** The production default: three exact callbacks, no bare hosts. */
+const DEFAULT = DEFAULT_REDIRECT_URIS;
 
 describe("redirectAllowed: loopback http", () => {
   it("allows localhost and 127.0.0.1 on any port and any path", () => {
@@ -66,7 +68,7 @@ describe("redirectAllowed: https allowlist", () => {
   });
 
   it("matches a bare-hostname entry on that hostname and no other", () => {
-    expect(redirectAllowed("https://vendor.example/connector/oauth/callback", DEFAULT)).toBe(true);
+    expect(redirectAllowed("https://vendor.example/connector/oauth/callback", ["vendor.example"])).toBe(true);
     expect(redirectAllowed("https://vendor.example/", ["vendor.example"])).toBe(true);
     expect(redirectAllowed("https://vendor.example/mcp/oauth/cb?x=1", ["vendor.example"])).toBe(true);
   });
@@ -139,5 +141,38 @@ describe("redirectAllowed: refusals", () => {
     for (const uri of ["", "vendor.example", "vendor.example/cb", "/callback", "not a url", "://bad"]) {
       expect(redirectAllowed(uri, DEFAULT), JSON.stringify(uri)).toBe(false);
     }
+  });
+});
+
+// The default allowlist names a hosted MCP client's exact connector callback, not the
+// vendor.example host. A host-wide entry would let any vendor.example page that
+// leaks its URL (open redirect, Referer, user content) receive an
+// authorization code for a client the attacker registered and holds the
+// PKCE verifier for. A bare-host entry, when an operator configures one,
+// also never vouches for a non-default port.
+describe("redirectAllowed: a hosted MCP client is an exact callback by default", () => {
+  it("allows the a hosted MCP client connector callback", () => {
+    expect(DEFAULT).toContain(CHATGPT);
+    expect(DEFAULT).not.toContain("vendor.example");
+    expect(redirectAllowed(CHATGPT, DEFAULT)).toBe(true);
+  });
+
+  it("refuses every other vendor.example URL", () => {
+    for (const uri of [
+      "https://vendor.example/",
+      "https://vendor.example/g/anything",
+      "https://vendor.example/connector/oauth/callback",
+      `${CHATGPT}?x=1`,
+      `${CHATGPT}/extra`,
+      "https://vendor.example:8443/connector_platform_oauth_redirect",
+    ]) {
+      expect(redirectAllowed(uri, DEFAULT), uri).toBe(false);
+    }
+  });
+
+  it("a configured bare host matches its default port only", () => {
+    expect(redirectAllowed("https://vendor.example/cb", ["vendor.example"])).toBe(true);
+    expect(redirectAllowed("https://vendor.example:443/cb", ["vendor.example"])).toBe(true);
+    expect(redirectAllowed("https://vendor.example:8443/cb", ["vendor.example"])).toBe(false);
   });
 });

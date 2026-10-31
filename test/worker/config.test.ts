@@ -28,7 +28,7 @@
 //                                  absent = no per-connection cap (`clientEmailPerMin: null`)
 // | OAUTH_REDIRECT_URIS | no       | comma list of https URLs OR bare hostnames  |
 //                                  (http allowed only on localhost/127.0.0.1); default =
-//                                  vendor.example + vendor.example callbacks + vendor.example  |
+//                                  vendor.example, vendor.example, vendor.example exact callbacks|
 // | EMAIL_BATCHING      | no       | RESERVED: read, never validated, never acted on             |
 //
 // Empty strings count as absent. Non-string values (bindings) are ignored.
@@ -138,7 +138,7 @@ describe("happy path", () => {
 
   it("default redirect allowlist covers the model and the a hosted MCP client connector", () => {
     expect([...DEFAULT_REDIRECT_URIS].sort()).toEqual(
-      ["vendor.example", "https://client.example.test/callback", "https://secondary.example.test/callback"].sort(),
+      ["https://vendor.example/connector_platform_oauth_redirect", "https://client.example.test/callback", "https://secondary.example.test/callback"].sort(),
     );
   });
 

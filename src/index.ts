@@ -49,7 +49,7 @@ const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1"]);
 /**
  * Whether `/authorize` may redirect to `redirectUri`. Loopback http is always
  * allowed (native apps); an https URI must equal an allowlisted full URL or be
- * on an allowlisted bare host. Matching is exact: no prefix or subdomain
+ * on an allowlisted bare host (default port only). Matching is exact: no prefix or subdomain
  * matching, so a look-alike host never receives a code.
  */
 export function redirectAllowed(redirectUri: string, allowlist: string[]): boolean {
@@ -67,7 +67,8 @@ export function redirectAllowed(redirectUri: string, allowlist: string[]): boole
   if (uri.protocol !== "https:") return false;
   for (const entry of allowlist) {
     if (isBareHostname(entry)) {
-      if (uri.hostname === entry.toLowerCase()) return true;
+      // Default port only: a bare host never vouches for other ports.
+      if (uri.hostname === entry.toLowerCase() && uri.port === "") return true;
       continue;
     }
     try {

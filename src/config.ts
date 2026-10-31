@@ -30,8 +30,9 @@ export interface Config {
 export const DEFAULT_REDIRECT_URIS = [
   "https://client.example.test/callback",
   "https://secondary.example.test/callback",
-  // The a hosted MCP client connector chooses its own callback path, so allow the host.
-  "vendor.example",
+  // The a hosted MCP client connector (apps/MCP) callback. Exact URL, not the whole host:
+  // a host-wide entry lets any vendor.example page that leaks its URL receive codes.
+  "https://vendor.example/connector_platform_oauth_redirect",
 ];
 
 export class ConfigError extends Error {

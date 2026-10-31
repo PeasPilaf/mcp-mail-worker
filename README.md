@@ -60,7 +60,7 @@ variables, because `wrangler deploy` replaces plain-text variables with the
 | Key | Required | Meaning |
 |---|---|---|
 | `MCP_AUTH_TOKEN_SHA256` | yes | SHA-256 (64 lowercase hex) of the access token. Set only by `npm run rotate-token` (see [The access token](#the-access-token)). |
-| `PUBLIC_URL` | yes | The Worker's https origin, e.g. `https://mcp-mail.<you>.workers.dev`. |
+| `PUBLIC_URL` | yes | The Worker's https origin, `https://example.aroundand.in`. |
 | `SMTP_HOST` | yes | SMTP host for your region/plan: `smtp.example.com`, `smtp.example.eu`, `smtp.example.in`, `smtp.example.com`, … |
 | `SMTP_PORT` | no (465) | `465` (implicit TLS) or `587` (STARTTLS). Cloudflare blocks port 25. |
 | `SMTP_USERNAME` | yes | Your the mail provider address. |
@@ -104,15 +104,23 @@ Cloudflare deploy credentials, and only the two steps that talk to
 Cloudflare can read them. Tests run in a separate job with no secrets.
 
 1. **Cloudflare API token.** Create one at dash.cloudflare.com → My Profile →
-   API Tokens with *Workers Scripts: Edit*, *Workers KV Storage: Edit* and
-   *Account Settings: Read*, limited to your account. Note your account ID.
+   API Tokens → Custom token, with:
+   - Account → *Workers Scripts: Edit*, *Workers KV Storage: Edit*,
+     *Account Settings: Read*, limited to your account;
+   - Zone → *Workers Routes: Edit* and *Zone: Read*, limited to the
+     `aroundand.in` zone (for the custom domain).
+
+   Note your account ID.
 2. **GitHub environment.** In the repository, go to Settings → Environments
    → New environment, name it `production`, and under *Deployment branches*
    allow only `main`. Add `CLOUDFLARE_API_TOKEN` and `CLOUDFLARE_ACCOUNT_ID`
    as environment secrets there. Nothing else goes in GitHub.
 3. **Run it.** Go to Actions → Deploy → **Run workflow** on `main`. The
    `test` job typechecks and runs the tests; the `deploy` job creates the
-   OAuth KV namespace if needed and runs `wrangler deploy`.
+   OAuth KV namespace if needed and runs `wrangler deploy`, which also
+   creates the `example.aroundand.in` DNS record and certificate. The
+   Worker has no `workers.dev` address. To use another hostname, change
+   `routes` in `wrangler.jsonc`.
 4. **Settings.** After the first deploy the Worker exists in your
    dashboard. Add every required key from the table (and any optional ones)
    as secrets there, or with `npx wrangler secret put`. They are not in
@@ -124,11 +132,11 @@ Re-run the workflow only when the code changes.
 ## Connect the model
 
 - **vendor.example / the model apps:** Settings → Connectors → Add custom connector,
-  URL `https://<PUBLIC_URL host>/mcp`. A sign-in page opens; paste the
+  URL `https://example.aroundand.in/mcp`. A sign-in page opens; paste the
   token from `rotate-token` once. vendor.example then holds its own short-lived
   tokens, and the model never sees either.
 - **the model Code:**
-  `add the MCP server --transport http mail https://<host>/mcp --header "Authorization: Bearer <token>"`
+  `add the MCP server --transport http mail https://example.aroundand.in/mcp --header "Authorization: Bearer <token>"`
 - **the model API (MCP connector):** pass the URL and `authorization_token`.
 
 ## Development

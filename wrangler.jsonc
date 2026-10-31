@@ -1,15 +1,18 @@
 // Cloudflare Worker configuration.
 //
 // Nothing sensitive or policy-related lives here: the allowlist, SMTP
-// settings and tokens are Worker secrets, pushed by the deploy workflow
-// from GitHub repository secrets (.github/workflows/deploy.yml).
+// settings and the token hash are Worker secrets, set in Cloudflare
+// (see README.md).
 {
   "$schema": "node_modules/wrangler/config-schema.json",
   "name": "mcp-mail",
   "main": "src/index.ts",
   "compatibility_date": "2026-10-01",
   "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
-  "workers_dev": true,
+  // Served only at the custom domain; `wrangler deploy` creates its DNS
+  // record and certificate. No *.workers.dev address.
+  "workers_dev": false,
+  "routes": [{ "pattern": "example.aroundand.in", "custom_domain": true }],
   "observability": { "enabled": true },
   "kv_namespaces": [
     // OAuth grants and tokens. The deploy workflow creates the namespace if

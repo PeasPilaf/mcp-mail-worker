@@ -4,6 +4,10 @@
 // * wrangler.jsonc binds OAUTH_KV and the RateLimiter Durable Object, and
 //   carries NO configuration values: everything in the config table is a
 //   Worker secret set in Cloudflare.
+// * The Worker is served ONLY at its custom domain, example.aroundand.in
+//   (a Cloudflare-managed zone): one route with `custom_domain: true`, so
+//   `wrangler deploy` creates the DNS record and certificate itself, and
+//   `workers_dev: false` so no *.workers.dev address answers.
 // * Runtime configuration lives ONLY in Cloudflare (dashboard -> Worker ->
 //   Settings -> Variables and Secrets, or `wrangler secret put`). GitHub
 //   never holds a Worker secret: no config key appears in any workflow, and
@@ -87,6 +91,11 @@ describe("wrangler.jsonc", () => {
     expect(w.durable_objects.bindings).toContainEqual({ name: "RATE_LIMITER", class_name: "RateLimiter" });
     expect(JSON.stringify(w.migrations)).toContain("RateLimiter");
     expect(w.compatibility_flags).toContain("nodejs_compat");
+  });
+
+  it("serves only the custom domain", () => {
+    expect(w.routes).toEqual([{ pattern: "example.aroundand.in", custom_domain: true }]);
+    expect(w.workers_dev).toBe(false);
   });
 
   it("carries no configuration values", () => {

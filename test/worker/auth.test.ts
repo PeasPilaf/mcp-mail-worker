@@ -37,16 +37,38 @@
 //     RateLimiter Durable Object. Over the limit -> 429, never a redirect,
 //     no code, no client registered. GET /authorize (showing the page) is
 //     not limited. These limits are separate from the email limit.
+//   * Client labels. Every connection has a label, so mail and limits can be
+//     attributed to it:
+//       - The sign-in page also asks for a label (text input name="label").
+//         A label is 1-32 chars of [a-z0-9-], starting with a letter or
+//         digit (no uppercase, spaces, underscores). "bearer" and "operator"
+//         are reserved. A missing or invalid label with the RIGHT token ->
+//         400 page, no redirect, no code.
+//       - The grant is created with `userId` = the label, so the OAuth KV
+//         keys are `grant:<label>:...` / `token:<label>:...` and
+//         `npm run clients` can list and revoke by label (test/node).
+//         The label is also in the grant props, next to the fingerprint.
+//       - The static bearer token is the client "bearer". Grants made
+//         before labels existed have no label in props and count as
+//         "operator".
+//       - Every email carries `X-MCP-Client: <label>` (mail.test.ts).
+//       - CLIENT_EMAIL_PER_MIN (optional): each label also gets its own
+//         flat window (Durable Object name `${limiterName}:client:<label>`)
+//         checked BEFORE the global EMAIL_PER_MIN window. A send must pass
+//         both; one refused by its client window does not use the global
+//         one. Refusals look exactly like the global limit (same error).
+//         Unset -> only the global window applies.
 //   * Every route answers 500 with an empty body when the configuration is
 //     invalid, before doing anything else.
 
 import { describe, expect, it } from "vitest";
 import { AUTH_ATTEMPTS_PER_MIN } from "../../src/index";
-import { ALICE, PUBLIC, TOKEN, TOKEN_SHA256, expectNoSecrets, expectSent, mcpInit, parseRpc, varsWith, varsWithout, worker, type TestWorker } from "./helpers";
+import { ALICE, INVALID_REQUEST, PUBLIC, TOKEN, TOKEN_SHA256, expectNoSecrets, expectRpcError, expectSent, mcpInit, parseRpc, varsWith, varsWithout, worker, type TestWorker } from "./helpers";
 
 const CALLBACK = "https://client.example.test/callback";
 const VERIFIER = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk-verifier-xyz";
 const LIST = { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} };
+const LIMIT = "email rate limit exceeded for this minute";
 
 async function challenge(v: string) {
   const d = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(v)));
@@ -74,17 +96,19 @@ async function authorizeQuery(cid: string, redirect = CALLBACK) {
   }).toString();
 }
 
-async function submit(w: TestWorker, query: string, token: string) {
+async function submit(w: TestWorker, query: string, token: string, label: string | null = "personal") {
+  const form = new URLSearchParams({ token });
+  if (label !== null) form.set("label", label);
   return w.fetch(`/authorize?${query}`, {
     method: "POST",
     headers: { "content-type": "application/x-www-form-urlencoded" },
-    body: new URLSearchParams({ token }).toString(),
+    body: form.toString(),
     redirect: "manual",
   });
 }
 
-async function getCode(w: TestWorker, cid: string) {
-  const r = await submit(w, await authorizeQuery(cid), TOKEN);
+async function getCode(w: TestWorker, cid: string, label = "personal") {
+  const r = await submit(w, await authorizeQuery(cid), TOKEN, label);
   expect(r.status, await r.clone().text()).toBe(302);
   const loc = new URL(r.headers.get("location")!);
   expect(`${loc.origin}${loc.pathname}`).toBe(CALLBACK);
@@ -96,13 +120,20 @@ async function token(w: TestWorker, form: Record<string, string>) {
   return w.fetch("/token", { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams(form).toString() });
 }
 
-async function fullFlow(w: TestWorker) {
+async function fullFlow(w: TestWorker, label = "personal") {
   const cid = await clientId(w);
-  const code = await getCode(w, cid);
+  const code = await getCode(w, cid, label);
   const r = await token(w, { grant_type: "authorization_code", code, redirect_uri: CALLBACK, client_id: cid, code_verifier: VERIFIER, resource: `${PUBLIC}/mcp` });
   expect(r.status, await r.clone().text()).toBe(200);
   return { cid, tokens: (await r.json()) as any };
 }
+
+async function sendAs(w: TestWorker, bearer: string, subject: string) {
+  return parseRpc(await w.fetch("/mcp", mcpInit({ jsonrpc: "2.0", id: 7, method: "tools/call", params: { name: "send_email", arguments: { to: ALICE, subject, body: "b" } } }, bearer)));
+}
+
+/** A label no other test uses (KV may be shared between tests). */
+const freshLabel = (prefix: string) => `${prefix}-${crypto.randomUUID().slice(0, 8)}`;
 
 async function mcpStatus(w: TestWorker, bearer: string | null) {
   return (await w.fetch("/mcp", mcpInit(LIST, bearer))).status;
@@ -197,6 +228,7 @@ describe("authorize page", () => {
     const html = await r.text();
     expect(html).toMatch(/type="password"/);
     expect(html).toMatch(/name="token"/);
+    expect(html).toMatch(/name="label"/);
     expect(html).toMatch(/method="post"/i);
     expectNoSecrets(html, "sign-in page");
   });
@@ -373,5 +405,57 @@ describe("other routes", () => {
       expect([401, 404], p).toContain(r.status);
       expectNoSecrets(await r.text(), p);
     }
+  });
+});
+
+describe("client labels", () => {
+  it("sign-in requires a valid label", async () => {
+    const w = worker();
+    const q = await authorizeQuery(await clientId(w));
+    for (const bad of [null, "", "Personal", "my phone", "a_b", "-lead", "a".repeat(33), "bearer", "operator", "é"]) {
+      const r = await submit(w, q, TOKEN, bad);
+      expect(r.status, String(bad)).toBe(400);
+      expect(r.headers.get("location"), String(bad)).toBeNull();
+    }
+    for (const good of ["a", "work", "phone-2", "9lives", "a".repeat(32)]) {
+      expect((await submit(worker(), await authorizeQuery(await clientId(w)), TOKEN, good)).status, good).toBe(302);
+    }
+  });
+
+  it("the grant is stored under the label", async () => {
+    const label = freshLabel("kv");
+    await fullFlow(worker(), label);
+    const { env } = await import("cloudflare:test");
+    const keys = (await env.OAUTH_KV.list({ prefix: `grant:${label}:` })).keys;
+    expect(keys).toHaveLength(1);
+  });
+
+  it("every email names its client", async () => {
+    const w = worker();
+    const label = freshLabel("tag");
+    const { tokens } = await fullFlow(w, label);
+    expectSent(await sendAs(w, tokens.access_token, "via oauth"));
+    expectSent(await sendAs(w, TOKEN, "via bearer"));
+    expect(w.mailer.sent.map((m) => [m.subject, m.headers["X-MCP-Client"]])).toEqual([["via oauth", label], ["via bearer", "bearer"]]);
+  });
+
+  it("CLIENT_EMAIL_PER_MIN caps each client, under the global cap", async () => {
+    const w = worker(varsWith({ CLIENT_EMAIL_PER_MIN: "2", EMAIL_PER_MIN: "3" }));
+    const a = (await fullFlow(w, freshLabel("a"))).tokens.access_token;
+    const b = (await fullFlow(w, freshLabel("b"))).tokens.access_token;
+    expectSent(await sendAs(w, a, "a1"));
+    expectSent(await sendAs(w, a, "a2"));
+    expectRpcError(await sendAs(w, a, "a3"), INVALID_REQUEST, LIMIT); // a's own window; global untouched
+    expectSent(await sendAs(w, b, "b1")); // global now 3/3
+    expectRpcError(await sendAs(w, b, "b2"), INVALID_REQUEST, LIMIT); // global window
+    expectRpcError(await sendAs(w, TOKEN, "bearer1"), INVALID_REQUEST, LIMIT);
+    expect(w.mailer.sent.map((m) => m.subject)).toEqual(["a1", "a2", "b1"]);
+  });
+
+  it("without CLIENT_EMAIL_PER_MIN only the global cap applies", async () => {
+    const w = worker(varsWith({ EMAIL_PER_MIN: "3" }));
+    const a = (await fullFlow(w, freshLabel("solo"))).tokens.access_token;
+    for (const s of ["1", "2", "3"]) expectSent(await sendAs(w, a, s));
+    expectRpcError(await sendAs(w, a, "4"), INVALID_REQUEST, LIMIT);
   });
 });

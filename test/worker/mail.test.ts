@@ -13,6 +13,11 @@
 //   requested: <raw to> }. text = redirectBody(requested, body); headers =
 //   { "X-MCP-Redirected-To": sanitizeRedirectHeader(requested) }. Subject
 //   unchanged.
+// * Every email also carries `X-MCP-Client: <label>` (CLIENT_HEADER): the
+//   label of the connection that sent it (see auth.test.ts). buildEmail
+//   takes it as its 5th argument; it is already validated, so it is copied
+//   as is. Below, "allowlisted -> headers exactly {}" means "exactly
+//   { X-MCP-Client }", and redirected mail has both headers.
 // * Header safety: CR and LF in the subject are replaced by a space each;
 //   nothing else in the subject changes.
 // * From is cfg.smtpFrom. Exactly one recipient, no cc/bcc.
@@ -30,7 +35,7 @@
 import { describe, expect, it } from "vitest";
 import { Email } from "worker-mailer";
 import { parseConfig } from "../../src/config";
-import { REDIRECT_HEADER, REDIRECT_HEADER_MAX_BYTES, buildEmail, redactConfigValues, redirectBody, resolveRecipient, sanitizeRedirectHeader } from "../../src/mail";
+import { CLIENT_HEADER, REDIRECT_HEADER, REDIRECT_HEADER_MAX_BYTES, buildEmail, redactConfigValues, redirectBody, resolveRecipient, sanitizeRedirectHeader } from "../../src/mail";
 import { SMTP_TIMEOUT_MS, smtpOptions, toEmailOptions } from "../../src/smtp";
 import { ALICE, BOB, DEFAULT_TO, FROM, OFF_LIST, PASSWORD, SMTP_HOST, TOKEN_SHA256, USERNAME, baseVars, varsWith } from "./helpers";
 
@@ -39,6 +44,7 @@ const cfg = () => parseConfig(baseVars());
 describe("constants", () => {
   it("match the contract", () => {
     expect(REDIRECT_HEADER).toBe("X-MCP-Redirected-To");
+    expect(CLIENT_HEADER).toBe("X-MCP-Client");
     expect(REDIRECT_HEADER_MAX_BYTES).toBe(256);
     expect(SMTP_TIMEOUT_MS).toBe(30_000);
   });
@@ -103,21 +109,21 @@ describe("sanitizeRedirectHeader", () => {
 });
 
 describe("buildEmail", () => {
-  it("hit: verbatim, canonical To, no extra headers", () => {
-    const e = buildEmail(cfg(), "Evil Twin <BOB.BUILDER@example.org>", "Quarterly report", "Hello Bob,\nsee attached.");
-    expect(e).toEqual({ from: { address: FROM }, to: { address: BOB }, subject: "Quarterly report", text: "Hello Bob,\nsee attached.", headers: {} });
+  it("hit: verbatim, canonical To, only the client header", () => {
+    const e = buildEmail(cfg(), "Evil Twin <BOB.BUILDER@example.org>", "Quarterly report", "Hello Bob,\nsee attached.", "personal");
+    expect(e).toEqual({ from: { address: FROM }, to: { address: BOB }, subject: "Quarterly report", text: "Hello Bob,\nsee attached.", headers: { [CLIENT_HEADER]: "personal" } });
   });
 
   it("redirect: default recipient, banner, header, subject unchanged", () => {
-    const e = buildEmail(cfg(), OFF_LIST, "Exfil", "secret stuff");
+    const e = buildEmail(cfg(), OFF_LIST, "Exfil", "secret stuff", "work");
     expect(e.to).toEqual({ address: DEFAULT_TO });
     expect(e.subject).toBe("Exfil");
     expect(e.text).toBe(redirectBody(OFF_LIST, "secret stuff"));
-    expect(e.headers).toEqual({ [REDIRECT_HEADER]: OFF_LIST });
+    expect(e.headers).toEqual({ [REDIRECT_HEADER]: OFF_LIST, [CLIENT_HEADER]: "work" });
   });
 
   it("injection via to and subject is neutralised", () => {
-    const e = buildEmail(cfg(), "x@y.example\r\nBcc: victim@z.example", "hi\r\nBcc: victim@z.example", "b");
+    const e = buildEmail(cfg(), "x@y.example\r\nBcc: victim@z.example", "hi\r\nBcc: victim@z.example", "b", "personal");
     expect(e.to).toEqual({ address: DEFAULT_TO });
     expect(e.headers[REDIRECT_HEADER]).toBe("x@y.exampleBcc: victim@z.example");
     expect(e.subject).toBe("hi  Bcc: victim@z.example");
@@ -125,22 +131,23 @@ describe("buildEmail", () => {
 
   it("long request is truncated in the header only", () => {
     const requested = `${"a".repeat(400)}@evil.example`;
-    const e = buildEmail(cfg(), requested, "s", "b");
+    const e = buildEmail(cfg(), requested, "s", "b", "personal");
     expect(e.headers[REDIRECT_HEADER]).toBe(sanitizeRedirectHeader(requested));
     expect(e.text).toContain(requested);
   });
 
   it("renders through worker-mailer without injected headers", () => {
-    const e = buildEmail(cfg(), "x@y.example\r\nBcc: victim@z.example", "hi\r\nBcc: victim@z.example", "body");
+    const e = buildEmail(cfg(), "x@y.example\r\nBcc: victim@z.example", "hi\r\nBcc: victim@z.example", "body", "personal");
     const data = new Email(toEmailOptions(e)).getEmailData();
     const head = data.split("\r\n\r\n")[0];
     expect(head).not.toMatch(/^bcc:/im);
     expect(head).toMatch(/^To: .*inbox@example\.net/m);
     expect(head).toMatch(/^X-MCP-Redirected-To: /m);
+    expect(head).toMatch(/^X-MCP-Client: personal\r?$/m);
   });
 
   it("toEmailOptions maps one recipient, plain text, no cc/bcc", () => {
-    const o = toEmailOptions(buildEmail(cfg(), ALICE, "s", "b")) as any;
+    const o = toEmailOptions(buildEmail(cfg(), ALICE, "s", "b", "personal")) as any;
     expect(o.text).toBe("b");
     expect(o.html).toBeUndefined();
     expect(o.cc).toBeUndefined();

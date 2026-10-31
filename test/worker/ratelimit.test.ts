@@ -1,11 +1,21 @@
 // Rate-limit contract.
 //
-// * ONE global token bucket: a single Durable Object instance
-//   (RATE_LIMITER, name "global" in production) whose `take(perMinute)`
-//   atomically takes a token. Capacity = EMAIL_PER_MIN, refilled
-//   continuously at EMAIL_PER_MIN per 60 s. State is in Durable Object
-//   storage, so it survives isolate restarts and is shared by every
-//   Cloudflare location (a per-isolate or per-colo counter would not be).
+// * ONE global SLIDING WINDOW, flat: in ANY 60-second span at most
+//   EMAIL_PER_MIN attempts are allowed. No burst on top, no refill credit.
+//   (A token bucket was used before and allowed ~2x in a 60 s span; the
+//   operator wants a hard cap.)
+// * Implementation: a single Durable Object instance (RATE_LIMITER, name
+//   "global" in production) whose `take(perMinute)` atomically decides.
+//   It keeps the timestamps (ms) of ALLOWED takes; a take at `now` is
+//   allowed iff fewer than perMinute of them are > now - 60_000 (a stamp
+//   exactly 60 s old has expired). Refused takes are not recorded, so
+//   hammering a full window can't extend it. The pure step is
+//   `takeSlot(sent, perMinute, nowMs) -> { allowed, sent }`, where `sent`
+//   is the pruned, ascending list of live stamps (undefined = empty).
+// * State is in Durable Object storage, so it survives isolate restarts and
+//   is shared by every Cloudflare location. It is stored under a NEW key,
+//   not the old token bucket's "bucket" key, so leftover bucket state from
+//   an earlier deploy is ignored.
 // * The check is the FIRST step of send_email, before the body cap and
 //   recipient resolution: every attempt costs a token (allowlisted,
 //   redirected, unparseable, oversize, and attempts that later fail at
@@ -16,47 +26,58 @@
 
 import { env } from "cloudflare:test";
 import { describe, expect, it } from "vitest";
-import { takeToken } from "../../src/ratelimit";
+import { takeSlot } from "../../src/ratelimit";
 import { ALICE, INTERNAL_ERROR, INVALID_REQUEST, OFF_LIST, SMTP_FAILURE, expectRpcError, expectSent, varsWith, worker } from "./helpers";
 
 const LIMIT = "email rate limit exceeded for this minute";
 
-describe("takeToken (pure)", () => {
-  it("starts full and empties", () => {
-    let s = undefined;
-    for (let i = 0; i < 3; i++) {
-      const r = takeToken(s, 3, 1_000);
-      expect(r.allowed).toBe(true);
-      s = r.state;
-    }
-    expect(takeToken(s, 3, 1_000).allowed).toBe(false);
+describe("takeSlot (pure)", () => {
+  const run = (perMinute: number, times: number[]) => {
+    let s: number[] | undefined;
+    return times.map((now) => {
+      const r = takeSlot(s, perMinute, now);
+      s = r.sent;
+      return r.allowed;
+    });
+  };
+
+  it("allows perMinute, then refuses", () => {
+    expect(run(3, [1_000, 1_000, 1_000, 1_000])).toEqual([true, true, true, false]);
   });
 
-  it("refills continuously at perMinute per 60 s, capped at perMinute", () => {
-    let s = undefined;
-    for (let i = 0; i < 6; i++) s = takeToken(s, 6, 0).state; // empty
-    expect(takeToken(s, 6, 9_999).allowed).toBe(false); // 6/min = one per 10 s
-    const r = takeToken(s, 6, 10_000);
-    expect(r.allowed).toBe(true);
-    expect(takeToken(r.state, 6, 10_000).allowed).toBe(false);
-
-    // A long idle period never accumulates more than the capacity.
-    let t = takeToken(r.state, 6, 3_600_000).state;
-    let granted = 1;
-    while (takeToken(t, 6, 3_600_000).allowed) {
-      t = takeToken(t, 6, 3_600_000).state;
-      granted++;
-      if (granted > 10) break;
+  it("never allows more than perMinute in any 60 s span", () => {
+    // Kartik's case: 20/min, one attempt every second for six minutes.
+    const times = Array.from({ length: 360 }, (_, i) => i * 1_000);
+    const ok = run(20, times);
+    const allowedAt = times.filter((_, i) => ok[i]);
+    for (const start of allowedAt) {
+      expect(allowedAt.filter((t) => t >= start && t < start + 60_000).length, `window at ${start}`).toBeLessThanOrEqual(20);
     }
-    expect(granted).toBe(6);
+    // ...and the cap is reached, not undershot: 20 per minute over 6 minutes.
+    expect(allowedAt.length).toBe(120);
   });
 
-  it("never goes negative on refused takes", () => {
-    let s = undefined;
-    for (let i = 0; i < 2; i++) s = takeToken(s, 2, 0).state;
-    for (let i = 0; i < 5; i++) s = takeToken(s!, 2, 0).state;
-    expect(s!.tokens).toBeGreaterThanOrEqual(0);
-    expect(takeToken(s, 2, 30_000).allowed).toBe(true);
+  it("a slot frees exactly 60 s after it was used", () => {
+    // 2/min: used at 0 and 10 s. Full until 60 s, then one slot, then 70 s.
+    expect(run(2, [0, 10_000, 59_999, 60_000, 60_001, 69_999, 70_000])).toEqual([true, true, false, true, false, false, true]);
+  });
+
+  it("no burst credit after idling", () => {
+    expect(run(3, [0, 3_600_000, 3_600_000, 3_600_000, 3_600_000])).toEqual([true, true, true, true, false]);
+  });
+
+  it("refused attempts don't extend the window", () => {
+    // Hammering a full window every 100 ms still frees the slot on time.
+    const times = [0, ...Array.from({ length: 600 }, (_, i) => 100 + i * 100)];
+    const ok = run(1, times);
+    expect(times.filter((_, i) => ok[i])).toEqual([0, 60_000]);
+  });
+
+  it("keeps only live stamps", () => {
+    let s: number[] | undefined;
+    for (let i = 0; i < 1_000; i++) s = takeSlot(s, 5, i * 30_000).sent;
+    expect(s!.length).toBeLessThanOrEqual(5);
+    expect(s!.every((t) => t > 999 * 30_000 - 60_000)).toBe(true);
   });
 });
 

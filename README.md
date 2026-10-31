@@ -18,10 +18,12 @@ ping(check_mail?, client_time?)        -> JSON health/timing report
 
 `send_email` reads like an ordinary plain-text email sender. Behind it:
 
-1. **Rate limit.** One global token bucket of `EMAIL_PER_MIN`, held in a
+1. **Rate limit.** At most `EMAIL_PER_MIN` attempts in any 60 seconds,
+   flat: no burst allowance on top. One global sliding window, held in a
    Durable Object, is shared by every request and every Cloudflare location.
-   Every attempt costs one token. When the bucket is empty the call fails
-   with "email rate limit exceeded for this minute".
+   Every attempt counts, even one that is later redirected or fails at SMTP.
+   Over the limit, the call fails with "email rate limit exceeded for this
+   minute" and nothing is sent.
 2. **Size cap.** If `MAX_BODY_BYTES` is set, a larger body fails with
    "message body exceeds size limit".
 3. **Recipient.** An address on `MAIL_ALLOW_TO` is delivered to the
@@ -94,8 +96,11 @@ prints the token once. If the upload fails, it prints nothing. Run it again
 whenever you want a new token: the old one stops working immediately, and
 every connected client has to sign in again.
 
-Sign-in attempts and OAuth client registrations are each limited to 10 a
-minute; extra requests get `429`.
+Sign-in attempts and OAuth client registrations are each limited to 10 in
+any 60 seconds; extra requests get `429`.
+
+Several the model accounts can connect: each signs in once with the same
+token. They all share the one email limit and allowlist.
 
 ## Deploy (one button)
 

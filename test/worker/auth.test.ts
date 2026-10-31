@@ -32,11 +32,11 @@
 //   * Grants carry a fingerprint of MCP_AUTH_TOKEN_SHA256; rotating the
 //     token makes every previously issued OAuth token fail with 401.
 //   * Brute-force / spam limits: POST /authorize (every sign-in attempt,
-//     right or wrong) and POST /register each draw from their own global
-//     bucket of AUTH_ATTEMPTS_PER_MIN (10) per minute, held in the
+//     right or wrong) and POST /register each have their own global
+//     limit of AUTH_ATTEMPTS_PER_MIN (10) in any 60 s, held in the
 //     RateLimiter Durable Object. Over the limit -> 429, never a redirect,
 //     no code, no client registered. GET /authorize (showing the page) is
-//     not limited. These buckets are separate from the email bucket.
+//     not limited. These limits are separate from the email limit.
 //   * Every route answers 500 with an empty body when the configuration is
 //     invalid, before doing anything else.
 

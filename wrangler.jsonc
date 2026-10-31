@@ -1,0 +1,23 @@
+// Cloudflare Worker configuration.
+//
+// Nothing sensitive or policy-related lives here: the allowlist, SMTP
+// settings and tokens are Worker secrets, pushed by the deploy workflow
+// from GitHub repository secrets (.github/workflows/deploy.yml).
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "mcp-mail",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+  "compatibility_flags": ["nodejs_compat", "global_fetch_strictly_public"],
+  "workers_dev": true,
+  "observability": { "enabled": true },
+  "kv_namespaces": [
+    // OAuth grants and tokens. The deploy workflow creates the namespace if
+    // needed and substitutes its id here at deploy time.
+    { "binding": "OAUTH_KV", "id": "00000000000000000000000000000000" }
+  ],
+  "durable_objects": {
+    "bindings": [{ "name": "RATE_LIMITER", "class_name": "RateLimiter" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["RateLimiter"] }]
+}

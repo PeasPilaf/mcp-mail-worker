@@ -1,0 +1,28 @@
+{
+  "name": "mcp-mail-worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Write-only, rate-limited, recipient-constrained email capability exposed to the model as an MCP server on Cloudflare Workers.",
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "rotate-token": "node scripts/rotate-token.mjs",
+    "deploy": "wrangler deploy",
+    "dev": "wrangler dev"
+  },
+  "dependencies": {
+    "@cloudflare/workers-oauth-provider": "1.2.4",
+    "@modelcontextprotocol/sdk": "1.32.2",
+    "worker-mailer": "1.3.0"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-plugin": "1.4.11",
+    "@cloudflare/workers-types": "5.20261031.1",
+    "@types/node": "^26.6.6",
+    "typescript": "^5.9.0",
+    "vitest": "^4.1.0",
+    "wrangler": "4.156.0",
+    "yaml": "^2.8.0"
+  }
+}

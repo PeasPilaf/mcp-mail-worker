@@ -1,0 +1,31 @@
+# Copy to .dev.vars for `wrangler dev`. Every value here is server-side only
+# configuration: it is never sent to, and never reaches, the LLM or MCP client.
+
+# sha256 (64 lowercase hex) of the operator token. The dev token is
+# `local-dev-token`; sign in with it. Regenerate for another token with
+#   printf %s local-dev-token | sha256sum
+# Production uses `npm run rotate-token`.
+MCP_AUTH_TOKEN_SHA256=0cd48eed49739dfdd99efaef37d251aae5a80866e5954763c6597943fff5ce9b
+PUBLIC_URL=http://localhost:8787
+
+SMTP_HOST=smtp.example.com
+# 465 (implicit TLS, default) or 587 (STARTTLS).
+SMTP_PORT=465
+SMTP_USERNAME=sender@example.com
+# App-specific password.
+SMTP_PASSWORD=replace-with-app-specific-password
+# Optional; defaults to SMTP_USERNAME. Display name allowed.
+SMTP_FROM=Mail Relay <sender@example.com>
+
+EMAIL_PER_MIN=5
+# Comma-separated bare addresses.
+MAIL_ALLOW_TO=alice@example.com,inbox@example.net
+# Optional; must be on MAIL_ALLOW_TO. Defaults to the first entry.
+MAIL_DEFAULT_TO=alice@example.com
+# Optional; absent means no cap.
+MAX_BODY_BYTES=100000
+# Optional; defaults to vendor.example and vendor.example callbacks.
+OAUTH_REDIRECT_URIS=https://client.example.test/callback,https://secondary.example.test/callback
+
+# Not implemented; read but ignored.
+EMAIL_BATCHING=false

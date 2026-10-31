@@ -1,2 +1,5 @@
-/target
+node_modules/
+.wrangler/
+.dev.vars
 .env
+coverage/

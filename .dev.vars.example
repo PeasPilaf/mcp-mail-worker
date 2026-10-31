@@ -28,8 +28,7 @@ MAIL_DEFAULT_TO=alice@example.com
 MAX_BODY_BYTES=100000
 # Optional; the https redirect allowlist for sign-in (full URLs or bare
 # hostnames). Loopback http (localhost, 127.0.0.1) is always allowed.
-# Defaults to the vendor.example and vendor.example callbacks plus the bare host
-# vendor.example.
+# Defaults to the exact vendor.example, vendor.example and a hosted MCP client connector callbacks.
 OAUTH_REDIRECT_URIS=https://client.example.test/callback,https://secondary.example.test/callback
 
 # Not implemented; read but ignored.

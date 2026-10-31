@@ -4,31 +4,65 @@
 // built on @cloudflare/workers-oauth-provider, with the MCP endpoint at
 // `/mcp` as the only protected route.
 //
+// There is NO static bearer path. The operator token is used in exactly one
+// place: the sign-in form on `/authorize`. `Authorization: Bearer <anything>`
+// on `/mcp` is unauthenticated, so the old token (even the correct one) gets
+// 401, an EMPTY body and a `WWW-Authenticate` header naming the resource
+// metadata URL. The only way to call `/mcp` is an OAuth grant.
+//
 // The operator token is never stored server-side. The Worker holds only
-// MCP_AUTH_TOKEN_SHA256 (set by `npm run rotate-token`); a presented token
-// is hashed with SHA-256 and compared to it in constant time
+// MCP_AUTH_TOKEN_SHA256 (set by `npm run rotate-token`); a presented token is
+// hashed with SHA-256 and compared to it in constant time
 // (crypto.subtle.timingSafeEqual). Presenting the hash itself must fail.
 //
-// Two ways in:
-//   * Static bearer: `Authorization: Bearer <token>` (the model Code, the
-//     API's MCP connector).
-//   * OAuth (vendor.example custom connectors): discovery -> dynamic client
-//     registration -> /authorize -> /token, authorization code + PKCE S256.
-//     The `/authorize` page is ours: an HTML form where the operator types
-//     the token once. Right token -> provider.completeAuthorization ->
-//     302 back to the client. Wrong token -> 401 page, no redirect.
+// OAuth: discovery -> dynamic client registration -> /authorize -> /token,
+// authorization code + PKCE S256. The `/authorize` page is ours: an HTML form
+// where the operator types the token once. Right token ->
+// provider.completeAuthorization -> 302 back to the client. Wrong token -> 401
+// page, no redirect.
 //
 // Rules:
 //   * `/mcp` without valid credentials -> 401, EMPTY body, with a
 //     `WWW-Authenticate` header naming the resource metadata URL. No tool
 //     logic runs (nothing sent, no rate-limit token spent).
-//   * `/authorize` serves only redirect URIs on OAUTH_REDIRECT_URIS; any
-//     other redirect_uri (even for a registered client) -> 400 page and
-//     NEVER a redirect. Malformed requests -> 400, no redirect.
+//   * `/authorize` serves only redirect URIs the redirect rule allows
+//     (`redirectAllowed`, src/index.ts): loopback http (localhost /
+//     127.0.0.1, any port and path), allowlisted full https URLs, and
+//     allowlisted bare hostnames matched exactly. Any other redirect_uri
+//     (even for a registered client, even an https look-alike of an
+//     allowlisted host) -> 400 page and NEVER a redirect. Malformed
+//     requests -> 400, no redirect.
 //   * The sign-in page: `X-Frame-Options: DENY`, CSP with
 //     `frame-ancestors 'none'`, a password field named `token`, method POST,
 //     no configured values in it. No `form-action 'self'` (browsers apply it
 //     to the post-submit redirect and it would block the hop to vendor.example).
+//   * Client labels. Every connection has a label, so mail and limits can be
+//     attributed to it:
+//       - The sign-in page also asks for a label (text input name="label"),
+//         pre-filled with `prefillLabel(clientName)` in its `value`
+//         attribute: the suggestion is sanitised to the label grammar, but
+//         the input is editable, required, and the POST handler still
+//         validates the submitted value. An empty pre-fill (unknown client
+//         name, or a reserved name like "operator") asks the human to type
+//         one.
+//       - A label is 1-32 chars of [a-z0-9-], starting with a letter or
+//         digit (no uppercase, spaces, underscores). Only "operator" is
+//         reserved: it names grants made before labels existed, so a human
+//         may not claim it. "bearer" is an ordinary label now that the
+//         static token is gone. A missing or invalid label with the RIGHT
+//         token -> 400 page, no redirect, no code.
+//       - The grant is created with `userId` = the label, so the OAuth KV
+//         keys are `grant:<label>:...` / `token:<label>:...` and
+//         `npm run clients` can list and revoke by label (test/node).
+//         The label is also in the grant props, next to the fingerprint.
+//       - Every email carries `X-MCP-Client: <label>` (mail.test.ts,
+//         tools.test.ts) and ping reports the label as `client`.
+//       - CLIENT_EMAIL_PER_MIN (optional): each label also gets its own
+//         flat window (Durable Object name `${limiterName}:client:<label>`)
+//         checked BEFORE the global EMAIL_PER_MIN window. A send must pass
+//         both; one refused by its client window does not use the global
+//         one. Refusals look exactly like the global limit (same error).
+//         Unset -> only the global window applies.
 //   * Grants carry a fingerprint of MCP_AUTH_TOKEN_SHA256; rotating the
 //     token makes every previously issued OAuth token fail with 401.
 //   * Brute-force / spam limits: POST /authorize (every sign-in attempt,
@@ -37,54 +71,45 @@
 //     RateLimiter Durable Object. Over the limit -> 429, never a redirect,
 //     no code, no client registered. GET /authorize (showing the page) is
 //     not limited. These limits are separate from the email limit.
-//   * Client labels. Every connection has a label, so mail and limits can be
-//     attributed to it:
-//       - The sign-in page also asks for a label (text input name="label").
-//         A label is 1-32 chars of [a-z0-9-], starting with a letter or
-//         digit (no uppercase, spaces, underscores). "bearer" and "operator"
-//         are reserved. A missing or invalid label with the RIGHT token ->
-//         400 page, no redirect, no code.
-//       - The grant is created with `userId` = the label, so the OAuth KV
-//         keys are `grant:<label>:...` / `token:<label>:...` and
-//         `npm run clients` can list and revoke by label (test/node).
-//         The label is also in the grant props, next to the fingerprint.
-//       - The static bearer token is the client "bearer". Grants made
-//         before labels existed have no label in props and count as
-//         "operator".
-//       - Every email carries `X-MCP-Client: <label>` (mail.test.ts).
-//       - CLIENT_EMAIL_PER_MIN (optional): each label also gets its own
-//         flat window (Durable Object name `${limiterName}:client:<label>`)
-//         checked BEFORE the global EMAIL_PER_MIN window. A send must pass
-//         both; one refused by its client window does not use the global
-//         one. Refusals look exactly like the global limit (same error).
-//         Unset -> only the global window applies.
 //   * Every route answers 500 with an empty body when the configuration is
 //     invalid, before doing anything else.
+//
+// The tool suites drive `/mcp` through the `authenticate` test seam (see
+// test/worker/helpers.ts). Tests in this file that need the real OAuth
+// provider on `/mcp` build `worker(vars, { oauth: true })`, which leaves the
+// seam out.
 
 import { describe, expect, it } from "vitest";
 import { AUTH_ATTEMPTS_PER_MIN } from "../../src/index";
-import { ALICE, INVALID_REQUEST, PUBLIC, TOKEN, TOKEN_SHA256, expectNoSecrets, expectRpcError, expectSent, mcpInit, parseRpc, varsWith, varsWithout, worker, type TestWorker } from "./helpers";
+import {
+  ALICE, INVALID_REQUEST, PUBLIC, TOKEN, TOKEN_SHA256, baseVars, expectNoSecrets, expectRpcError, expectSent,
+  mcpInit, parseRpc, varsWith, varsWithout, worker, type TestWorker,
+} from "./helpers";
 
 const CALLBACK = "https://client.example.test/callback";
 const VERIFIER = "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk-verifier-xyz";
 const LIST = { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} };
 const LIMIT = "email rate limit exceeded for this minute";
+const RM = `${PUBLIC}/.well-known/oauth-protected-resource`;
+
+/** Worker whose /mcp is guarded by the real OAuth provider (no test seam). */
+const providerWorker = (vars = baseVars()) => worker(vars, { oauth: true });
 
 async function challenge(v: string) {
   const d = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(v)));
   return btoa(String.fromCharCode(...d)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
-async function register(w: TestWorker, redirectUris: string[]) {
+async function register(w: TestWorker, redirectUris: string[], clientName = "the model") {
   return w.fetch("/register", {
     method: "POST",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ client_name: "the model", redirect_uris: redirectUris, token_endpoint_auth_method: "none", grant_types: ["authorization_code", "refresh_token"], response_types: ["code"] }),
+    body: JSON.stringify({ client_name: clientName, redirect_uris: redirectUris, token_endpoint_auth_method: "none", grant_types: ["authorization_code", "refresh_token"], response_types: ["code"] }),
   });
 }
 
-async function clientId(w: TestWorker, redirect = CALLBACK) {
-  const r = await register(w, [redirect]);
+async function clientId(w: TestWorker, redirect = CALLBACK, clientName = "the model") {
+  const r = await register(w, [redirect], clientName);
   expect(r.status).toBe(201);
   return ((await r.json()) as any).client_id as string;
 }
@@ -128,8 +153,8 @@ async function fullFlow(w: TestWorker, label = "personal") {
   return { cid, tokens: (await r.json()) as any };
 }
 
-async function sendAs(w: TestWorker, bearer: string, subject: string) {
-  return parseRpc(await w.fetch("/mcp", mcpInit({ jsonrpc: "2.0", id: 7, method: "tools/call", params: { name: "send_email", arguments: { to: ALICE, subject, body: "b" } } }, bearer)));
+async function sendAs(w: TestWorker, token: string, subject: string) {
+  return parseRpc(await w.fetch("/mcp", mcpInit({ jsonrpc: "2.0", id: 7, method: "tools/call", params: { name: "send_email", arguments: { to: ALICE, subject, body: "b" } } }, token)));
 }
 
 /** A label no other test uses (KV may be shared between tests). */
@@ -139,39 +164,52 @@ async function mcpStatus(w: TestWorker, bearer: string | null) {
   return (await w.fetch("/mcp", mcpInit(LIST, bearer))).status;
 }
 
-describe("static bearer", () => {
-  it("accepts the right token", async () => {
-    expect(await mcpStatus(worker(), TOKEN)).toBe(200);
+/** The sign-in page's label input: its whole tag and its value attribute ("" if none). */
+function labelInput(html: string) {
+  const tag = html.match(/<input\b[^>]*\bname=["']label["'][^>]*>/i)?.[0];
+  expect(tag, "sign-in page has a label input").toBeTruthy();
+  return { tag: tag!, value: tag!.match(/\bvalue=["']([^"']*)["']/)?.[1] ?? "" };
+}
+
+describe("static bearer (removed)", () => {
+  it("the correct operator token is not a credential on /mcp", async () => {
+    const w = providerWorker();
+    const r = await w.fetch("/mcp", mcpInit(LIST, TOKEN));
+    expect(r.status).toBe(401);
+    expect(await r.text()).toBe("");
+    expect(r.headers.get("www-authenticate") ?? "").toContain(`resource_metadata="${RM}`);
   });
 
-  it("rejects everything else with an empty 401 and a resource-metadata challenge", async () => {
-    const w = worker();
-    for (const auth of [null, "", "wrong", TOKEN.slice(0, -1), `${TOKEN}x`, `${TOKEN.slice(0, -1)}X`]) {
-      const r = await w.fetch("/mcp", mcpInit(LIST, auth));
-      expect(r.status, `token ${auth}`).toBe(401);
-      expect(await r.text()).toBe("");
-      expect(r.headers.get("www-authenticate") ?? "").toContain(`resource_metadata="${PUBLIC}/.well-known/oauth-protected-resource`);
-    }
-    for (const raw of [TOKEN, `Basic ${TOKEN}`, `Bearer  ${TOKEN}x`]) {
-      const init = mcpInit(LIST, null, { authorization: raw });
-      expect((await w.fetch("/mcp", init)).status, raw).toBe(401);
+  it("rejects every Authorization value with the same empty 401 challenge", async () => {
+    const w = providerWorker();
+    for (const raw of [null, TOKEN, `Bearer ${TOKEN}`, `Basic ${TOKEN}`, `Bearer  ${TOKEN}`, `Bearer ${TOKEN}x`, "Bearer wrong"]) {
+      const init = raw === null ? mcpInit(LIST) : mcpInit(LIST, null, { authorization: raw });
+      const r = await w.fetch("/mcp", init);
+      expect(r.status, String(raw)).toBe(401);
+      expect(await r.text(), String(raw)).toBe("");
+      expect(r.headers.get("www-authenticate") ?? "", String(raw)).toContain(`resource_metadata="${RM}`);
     }
   });
 
-  it("rejected requests run no tool logic", async () => {
-    const w = worker(varsWith({ EMAIL_PER_MIN: "1" }));
+  it("the old token runs no tool logic and spends no rate-limit token", async () => {
+    const w = providerWorker(varsWith({ EMAIL_PER_MIN: "1" }));
     const call = { jsonrpc: "2.0", id: 1, method: "tools/call", params: { name: "send_email", arguments: { to: ALICE, subject: "s", body: "b" } } };
-    for (const t of [null, "nope"]) expect((await w.fetch("/mcp", mcpInit(call, t))).status).toBe(401);
+    expect((await w.fetch("/mcp", mcpInit(call, TOKEN))).status).toBe(401);
     expect(w.mailer.sent).toHaveLength(0);
-    expectSent(await w.sendEmail(ALICE, "s", "b"));
+    // A real grant still has its full budget: the refused request was not counted.
+    const { tokens } = await fullFlow(w);
+    expectSent(await sendAs(w, tokens.access_token, "s"));
+    expectRpcError(await sendAs(w, tokens.access_token, "again"), INVALID_REQUEST, LIMIT);
+    expect(w.mailer.sent).toHaveLength(1);
   });
 
   it("stateless: no session id, no handshake needed", async () => {
-    const w = worker();
-    const init = await w.fetch("/mcp", mcpInit({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "t", version: "0" } } }, TOKEN));
+    const w = providerWorker();
+    const { tokens } = await fullFlow(w);
+    const init = await w.fetch("/mcp", mcpInit({ jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "t", version: "0" } } }, tokens.access_token));
     expect(init.status).toBe(200);
     expect(init.headers.get("mcp-session-id")).toBeNull();
-    const r = await w.fetch("/mcp", mcpInit({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "send_email", arguments: { to: ALICE, subject: "s", body: "b" } } }, TOKEN));
+    const r = await w.fetch("/mcp", mcpInit({ jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "send_email", arguments: { to: ALICE, subject: "s", body: "b" } } }, tokens.access_token));
     expect(r.headers.get("mcp-session-id")).toBeNull();
     expectSent(await parseRpc(r));
   });
@@ -241,18 +279,70 @@ describe("authorize page", () => {
     expect(html).not.toContain("<script>alert(1)</script>");
   });
 
+  it("pre-fills the label from the client name", async () => {
+    const w = worker();
+    const cid = await clientId(w, CALLBACK, "Example Desktop");
+    const html = await (await w.fetch(`/authorize?${await authorizeQuery(cid)}`)).text();
+    expect(labelInput(html).value).toBe("example-desktop");
+  });
+
+  it("pre-fills a sanitised value for an awkward client name", async () => {
+    const w = worker();
+    const cid = await clientId(w, CALLBACK, "Example.ai Connector");
+    const html = await (await w.fetch(`/authorize?${await authorizeQuery(cid)}`)).text();
+    expect(labelInput(html).value).toBe("example-ai-connector");
+  });
+
+  it("the pre-filled label is editable, required, and still validated on POST", async () => {
+    const w = worker();
+    const cid = await clientId(w, CALLBACK, "Example Desktop");
+    const q = await authorizeQuery(cid);
+    const { tag, value } = labelInput(await (await w.fetch(`/authorize?${q}`)).text());
+    expect(value).toBe("example-desktop");
+    expect(tag).toMatch(/\brequired\b/);
+    expect(tag).not.toMatch(/\breadonly\b|\bdisabled\b/);
+    // The suggestion itself is a valid label...
+    expect((await submit(w, q, TOKEN, "example-desktop")).status).toBe(302);
+    // ...the human may replace it...
+    expect((await submit(w, q, TOKEN, "my-phone")).status).toBe(302);
+    // ...and the POST handler still enforces the grammar.
+    expect((await submit(w, q, TOKEN, "My Phone")).status).toBe(400);
+  });
+
+  it("a reserved client name pre-fills empty, unlike an ordinary one", async () => {
+    const w = worker();
+    const ordinary = await clientId(w, CALLBACK, "Example Desktop");
+    const reserved = await clientId(w, CALLBACK, "operator");
+    const ordinaryHtml = await (await w.fetch(`/authorize?${await authorizeQuery(ordinary)}`)).text();
+    const reservedHtml = await (await w.fetch(`/authorize?${await authorizeQuery(reserved)}`)).text();
+    expect(labelInput(ordinaryHtml).value).toBe("example-desktop");
+    expect(labelInput(reservedHtml).value).toBe("");
+  });
+
   it("rejects redirect URIs off the list, even for registered clients", async () => {
     const w = worker();
-    const evil = "https://evil.example/callback";
-    const reg = await register(w, [evil]);
-    const cid = reg.status === 201 ? ((await reg.json()) as any).client_id : await clientId(w);
-    const q = await authorizeQuery(cid, evil);
-    const g = await w.fetch(`/authorize?${q}`, { redirect: "manual" });
-    expect(g.status).toBe(400);
-    expect(g.headers.get("location")).toBeNull();
-    const p = await submit(w, q, TOKEN);
-    expect(p.status).toBe(400);
-    expect(p.headers.get("location")).toBeNull();
+    for (const evil of ["https://evil.example/callback", "https://evil.vendor.example.attacker.net/cb", "https://vendor.example.evil.net/cb"]) {
+      const reg = await register(w, [evil]);
+      const cid = reg.status === 201 ? ((await reg.json()) as any).client_id : await clientId(w);
+      const q = await authorizeQuery(cid, evil);
+      const g = await w.fetch(`/authorize?${q}`, { redirect: "manual" });
+      expect(g.status, evil).toBe(400);
+      expect(g.headers.get("location"), evil).toBeNull();
+      const p = await submit(w, q, TOKEN);
+      expect(p.status, evil).toBe(400);
+      expect(p.headers.get("location"), evil).toBeNull();
+    }
+  });
+
+  it("allows the redirects the new rule permits: loopback and allowlisted bare hosts", async () => {
+    const w = worker();
+    for (const redirect of ["http://localhost:33418/callback", "http://127.0.0.1:8976/oauth/done", "https://vendor.example/connector/oauth/callback"]) {
+      const cid = await clientId(w, redirect);
+      const r = await w.fetch(`/authorize?${await authorizeQuery(cid, redirect)}`);
+      expect(r.status, redirect).toBe(200);
+      expect(r.headers.get("content-type"), redirect).toMatch(/^text\/html/);
+      expect(await r.text(), redirect).toContain('name="token"');
+    }
   });
 
   it("rejects malformed requests without redirecting", async () => {
@@ -292,12 +382,18 @@ describe("authorize page", () => {
     expect((await w.fetch(`/authorize?${await authorizeQuery(custom, "https://custom.example/cb")}`)).status).toBe(200);
     const model = await clientId(w);
     expect((await w.fetch(`/authorize?${await authorizeQuery(model)}`, { redirect: "manual" })).status).toBe(400);
+    // A bare-host entry covers any path on that host, still no look-alikes.
+    const hosted = worker(varsWith({ OAUTH_REDIRECT_URIS: "custom.example" }));
+    const ok = await clientId(hosted, "https://custom.example/any/path");
+    expect((await hosted.fetch(`/authorize?${await authorizeQuery(ok, "https://custom.example/any/path")}`)).status).toBe(200);
+    const lookalike = await clientId(hosted, "https://custom.example.evil.net/cb");
+    expect((await hosted.fetch(`/authorize?${await authorizeQuery(lookalike, "https://custom.example.evil.net/cb")}`, { redirect: "manual" })).status).toBe(400);
   });
 });
 
 describe("OAuth flow", () => {
   it("issues tokens that work on /mcp", async () => {
-    const w = worker();
+    const w = providerWorker();
     const { tokens } = await fullFlow(w);
     expect(tokens.token_type.toLowerCase()).toBe("bearer");
     expect(tokens.access_token).not.toBe(TOKEN);
@@ -321,7 +417,7 @@ describe("OAuth flow", () => {
   });
 
   it("refresh tokens are not bearer tokens", async () => {
-    const w = worker();
+    const w = providerWorker();
     const { cid, tokens } = await fullFlow(w);
     expect(await mcpStatus(w, tokens.refresh_token)).toBe(401);
     const r = await token(w, { grant_type: "refresh_token", refresh_token: tokens.refresh_token, client_id: cid });
@@ -330,20 +426,18 @@ describe("OAuth flow", () => {
   });
 
   it("rotating the token revokes issued tokens", async () => {
-    const w = worker();
+    const w = providerWorker();
     const { tokens } = await fullFlow(w);
     // sha256("ffffffffffffffffffffffffffffffff-rotated")
-    const rotated = worker(varsWith({ MCP_AUTH_TOKEN_SHA256: "50dc2b44f1bc3d28011dfa8705527346f8aab7df9a738a8955a8b51197896ef7" }));
+    const rotated = providerWorker(varsWith({ MCP_AUTH_TOKEN_SHA256: "50dc2b44f1bc3d28011dfa8705527346f8aab7df9a738a8955a8b51197896ef7" }));
     expect(await mcpStatus(rotated, tokens.access_token)).toBe(401);
-    expect(await mcpStatus(rotated, TOKEN)).toBe(401);
-    expect(await mcpStatus(rotated, "ffffffffffffffffffffffffffffffff-rotated")).toBe(200);
     expect(await mcpStatus(w, tokens.access_token)).toBe(200);
   });
 });
 
 describe("hashed token", () => {
   it("the stored hash is not itself a credential", async () => {
-    const w = worker();
+    const w = providerWorker();
     expect(await mcpStatus(w, TOKEN_SHA256)).toBe(401);
     const r = await submit(w, await authorizeQuery(await clientId(w)), TOKEN_SHA256);
     expect(r.status).toBe(401);
@@ -412,12 +506,12 @@ describe("client labels", () => {
   it("sign-in requires a valid label", async () => {
     const w = worker();
     const q = await authorizeQuery(await clientId(w));
-    for (const bad of [null, "", "Personal", "my phone", "a_b", "-lead", "a".repeat(33), "bearer", "operator", "é"]) {
+    for (const bad of [null, "", "Personal", "my phone", "a_b", "-lead", "a".repeat(33), "operator", "é", "bearer "]) {
       const r = await submit(w, q, TOKEN, bad);
       expect(r.status, String(bad)).toBe(400);
       expect(r.headers.get("location"), String(bad)).toBeNull();
     }
-    for (const good of ["a", "work", "phone-2", "9lives", "a".repeat(32)]) {
+    for (const good of ["a", "work", "phone-2", "9lives", "a".repeat(32), "bearer"]) {
       expect((await submit(worker(), await authorizeQuery(await clientId(w)), TOKEN, good)).status, good).toBe(302);
     }
   });
@@ -431,29 +525,30 @@ describe("client labels", () => {
   });
 
   it("every email names its client", async () => {
-    const w = worker();
+    const w = providerWorker();
     const label = freshLabel("tag");
     const { tokens } = await fullFlow(w, label);
     expectSent(await sendAs(w, tokens.access_token, "via oauth"));
-    expectSent(await sendAs(w, TOKEN, "via bearer"));
-    expect(w.mailer.sent.map((m) => [m.subject, m.headers["X-MCP-Client"]])).toEqual([["via oauth", label], ["via bearer", "bearer"]]);
+    expect(w.mailer.sent.map((m) => [m.subject, m.headers["X-MCP-Client"]])).toEqual([["via oauth", label]]);
+    expect(JSON.stringify(w.mailer.sent)).not.toContain('"bearer"');
   });
 
   it("CLIENT_EMAIL_PER_MIN caps each client, under the global cap", async () => {
-    const w = worker(varsWith({ CLIENT_EMAIL_PER_MIN: "2", EMAIL_PER_MIN: "3" }));
+    const w = providerWorker(varsWith({ CLIENT_EMAIL_PER_MIN: "2", EMAIL_PER_MIN: "3" }));
     const a = (await fullFlow(w, freshLabel("a"))).tokens.access_token;
     const b = (await fullFlow(w, freshLabel("b"))).tokens.access_token;
+    const c = (await fullFlow(w, freshLabel("c"))).tokens.access_token;
     expectSent(await sendAs(w, a, "a1"));
     expectSent(await sendAs(w, a, "a2"));
     expectRpcError(await sendAs(w, a, "a3"), INVALID_REQUEST, LIMIT); // a's own window; global untouched
     expectSent(await sendAs(w, b, "b1")); // global now 3/3
     expectRpcError(await sendAs(w, b, "b2"), INVALID_REQUEST, LIMIT); // global window
-    expectRpcError(await sendAs(w, TOKEN, "bearer1"), INVALID_REQUEST, LIMIT);
+    expectRpcError(await sendAs(w, c, "c1"), INVALID_REQUEST, LIMIT); // global window, fresh client window
     expect(w.mailer.sent.map((m) => m.subject)).toEqual(["a1", "a2", "b1"]);
   });
 
   it("without CLIENT_EMAIL_PER_MIN only the global cap applies", async () => {
-    const w = worker(varsWith({ EMAIL_PER_MIN: "3" }));
+    const w = providerWorker(varsWith({ EMAIL_PER_MIN: "3" }));
     const a = (await fullFlow(w, freshLabel("solo"))).tokens.access_token;
     for (const s of ["1", "2", "3"]) expectSent(await sendAs(w, a, s));
     expectRpcError(await sendAs(w, a, "4"), INVALID_REQUEST, LIMIT);

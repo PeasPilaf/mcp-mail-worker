@@ -35,10 +35,11 @@ ping(check_mail?, client_time?)        -> JSON health/timing report
    STARTTLS; 30 s timeout. An SMTP failure returns an internal error whose
    text has every configured value replaced by `[redacted]`.
 
-`ping` returns `status`, `server_time`, the Cloudflare `colo` and
-`handler_ms`. Pass `client_time` (ISO 8601) to get `received_after_ms`.
-Pass `check_mail: true` to connect and log in to the mail provider without sending,
-which reports `mail.ok` and `mail.ms` and costs one rate-limit token.
+`ping` returns `status`, `client` (the connection's label), `server_time`,
+the Cloudflare `colo` and `handler_ms`. Pass `client_time` (ISO 8601) to get
+`received_after_ms`. Pass `check_mail: true` to connect and log in to the mail provider
+without sending, which reports `mail.ok` and `mail.ms` and costs one
+rate-limit token.
 
 **What it does not expose**
 
@@ -61,7 +62,7 @@ variables, because `wrangler deploy` replaces plain-text variables with the
 
 | Key | Required | Meaning |
 |---|---|---|
-| `MCP_AUTH_TOKEN_SHA256` | yes | SHA-256 (64 lowercase hex) of the access token. Set only by `npm run rotate-token` (see [The access token](#the-access-token)). |
+| `MCP_AUTH_TOKEN_SHA256` | yes | SHA-256 (64 lowercase hex) of the operator token, which authorizes sign-in only. Set only by `npm run rotate-token` (see [The operator token](#the-operator-token)). |
 | `PUBLIC_URL` | yes | The Worker's https origin, `https://example.aroundand.in`. |
 | `SMTP_HOST` | yes | SMTP host for your region/plan: `smtp.example.com`, `smtp.example.eu`, `smtp.example.in`, `smtp.example.com`, … |
 | `SMTP_PORT` | no (465) | `465` (implicit TLS) or `587` (STARTTLS). Cloudflare blocks port 25. |
@@ -73,7 +74,7 @@ variables, because `wrangler deploy` replaces plain-text variables with the
 | `MAIL_ALLOW_TO` | yes | Comma-separated bare addresses the model may email. |
 | `MAIL_DEFAULT_TO` | no | Where everything else goes. Must be on the allowlist; defaults to its first entry. |
 | `MAX_BODY_BYTES` | no | Body size cap in bytes. Unset = no cap. |
-| `OAUTH_REDIRECT_URIS` | no | Redirect URIs the sign-in page will send codes to. Defaults to the vendor.example and vendor.example connector callbacks. |
+| `OAUTH_REDIRECT_URIS` | no | Redirect allowlist for the sign-in page: comma-separated https URLs or bare hostnames. Defaults to the vendor.example and vendor.example connector callbacks plus the bare host `vendor.example`. Loopback http is always allowed (see [Connect the model](#connect-model)). |
 | `EMAIL_BATCHING` | no | Reserved. Read but ignored. |
 
 If a value is missing or invalid, every request gets an empty `500`, and
@@ -81,9 +82,9 @@ If a value is missing or invalid, every request gets an empty `500`, and
 changing settings, have the model call `ping` with `check_mail: true` to check
 the the mail provider login.
 
-## The access token
+## The operator token
 
-The Worker never stores the access token, only its SHA-256 hash. The token
+The Worker never stores the operator token, only its SHA-256 hash. The token
 itself exists in exactly one place: wherever you paste it.
 
 ```sh
@@ -97,18 +98,24 @@ prints the token once. If the upload fails, it prints nothing. Run it again
 whenever you want a new token: the old one stops working immediately, and
 every connected client has to sign in again.
 
+The token authorizes signing in and nothing else. It is not an MCP
+credential: `/mcp` accepts only a connection's own OAuth token, so this
+token can never send mail by itself, whatever header carries it.
+
 Sign-in attempts and OAuth client registrations are each limited to 10 in
 any 60 seconds; extra requests get `429`.
 
 ## Connections
 
-Several the model accounts can connect. Each one signs in once with the same
-token and picks a **label**, such as `personal` or `work` (lowercase
-letters, digits and `-`, up to 32 characters). the model Code and API clients
-using the bearer token count as `bearer`, and connections made before
-labels existed count as `operator`.
+Every client signs in once with the operator token and chooses a **label**,
+such as `personal` or `work` (lowercase letters, digits and `-`, up to 32
+characters). The sign-in page pre-fills it from the client's name —
+`Example Desktop` becomes `example-desktop` — and the field stays editable, so
+you can accept the suggestion or type your own. Connections made before
+labels existed count as `operator`, a reserved label nobody can claim.
 
-- Every email carries an `X-MCP-Client: <label>` header.
+- Every email carries an `X-MCP-Client: <label>` header, and `ping` reports
+  the same label as `client`.
 - With `CLIENT_EMAIL_PER_MIN` set, each label also gets its own limit, on
   top of the shared `EMAIL_PER_MIN`.
 - `npm run clients` lists labels and how many connections each has, and
@@ -153,13 +160,31 @@ Re-run the workflow only when the code changes.
 
 ## Connect the model
 
+Every client signs in through OAuth; there is no header or static token to
+configure. On the sign-in page, paste the operator token once and confirm
+the pre-filled label. The client then holds its own short-lived OAuth
+tokens, and the model never sees them.
+
 - **vendor.example / the model apps:** Settings → Connectors → Add custom connector,
-  URL `https://example.aroundand.in/mcp`. A sign-in page opens; paste the
-  token from `rotate-token` once. vendor.example then holds its own short-lived
-  tokens, and the model never sees either.
-- **the model Code:**
-  `add the MCP server --transport http mail https://example.aroundand.in/mcp --header "Authorization: Bearer <token>"`
-- **the model API (MCP connector):** pass the URL and `authorization_token`.
+  URL `https://example.aroundand.in/mcp`. The sign-in page opens from there.
+- **the model Code:** `add the MCP server --transport http mail
+  https://example.aroundand.in/mcp`, then authenticate with `/mcp`; the
+  browser opens the sign-in page.
+- **MCP Inspector:** start it, connect to the same URL over HTTP, and it
+  opens the sign-in page in your browser.
+
+The sign-in page only redirects to an allowed callback, decided in two parts.
+**Loopback** addresses — `http://localhost:*` and `http://127.0.0.1:*`, any
+port and path — are always allowed, which is how desktop tools like the model
+Code and MCP Inspector catch the code. **https** callbacks must match
+`OAUTH_REDIRECT_URIS`: by default the vendor.example callback, the vendor.example
+callback, and the bare host `vendor.example`. An entry is either a full URL,
+matched exactly, or a bare hostname, which matches any path on exactly that
+host (not its subdomains). Any other redirect is refused with a `400` and is
+never followed.
+
+A client that can only send a fixed header token, with no interactive
+sign-in step, cannot connect.
 
 ## Development
 

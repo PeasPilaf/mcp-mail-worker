@@ -2,7 +2,7 @@
 
 import OAuthProvider, { type OAuthHelpers } from "@cloudflare/workers-oauth-provider";
 import { WebStandardStreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js";
-import { parseConfig, type Config } from "./config";
+import { isBareHostname, parseConfig, type Config } from "./config";
 import { createMcpServer } from "./mcp";
 import { smtpMailer, type MailerFactory } from "./smtp";
 
@@ -13,6 +13,13 @@ export interface HandlerOptions {
   mailerFactory?: MailerFactory;
   /** Durable Object name of the global rate limiter. Defaults to "global". */
   limiterName?: string;
+  /**
+   * TEST SEAM: authenticate `/mcp` from the request instead of delegating to
+   * the OAuth provider. Only test harnesses supply it — production leaves it
+   * unset (see `export default createHandler()` at the bottom), so the
+   * provider remains the only way in.
+   */
+  authenticate?: (request: Request, env: Env) => Promise<{ label: string } | null>;
 }
 
 type AppEnv = Env & { OAUTH_PROVIDER: OAuthHelpers };
@@ -31,10 +38,63 @@ async function sha256(s: string): Promise<Uint8Array> {
 }
 
 const LABEL_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
-const RESERVED_LABELS = ["bearer", "operator"];
+const RESERVED_LABELS = ["operator"];
 
 /** Sign-in / registration attempts allowed per minute, each. */
 export const AUTH_ATTEMPTS_PER_MIN = 10;
+
+/** Plain http is only for RFC 8252 native-app loopback callbacks. */
+const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1"]);
+
+/**
+ * Whether `/authorize` may redirect to `redirectUri`. Loopback http is always
+ * allowed (native apps); an https URI must equal an allowlisted full URL or be
+ * on an allowlisted bare host. Matching is exact: no prefix or subdomain
+ * matching, so a look-alike host never receives a code.
+ */
+export function redirectAllowed(redirectUri: string, allowlist: string[]): boolean {
+  // A fragment is never part of an OAuth redirect; reject it before parsing
+  // (`https://host/cb#` has an empty `hash`, so the raw string has to say).
+  if (redirectUri.includes("#")) return false;
+  let uri: URL;
+  try {
+    uri = new URL(redirectUri);
+  } catch {
+    return false;
+  }
+  if (uri.username || uri.password) return false;
+  if (uri.protocol === "http:") return LOOPBACK_HOSTS.has(uri.hostname);
+  if (uri.protocol !== "https:") return false;
+  for (const entry of allowlist) {
+    if (isBareHostname(entry)) {
+      if (uri.hostname === entry.toLowerCase()) return true;
+      continue;
+    }
+    try {
+      if (new URL(entry).href === uri.href) return true;
+    } catch {
+      // An unparseable entry can never match; config validation prevents it.
+    }
+  }
+  return false;
+}
+
+/**
+ * Suggested connection label derived from the OAuth client's name. Sanitised
+ * to LABEL_RE so the form's suggestion is always submittable; "" when nothing
+ * usable remains, or when that would be a reserved label (so the human must
+ * pick one).
+ */
+export function prefillLabel(clientName: string | undefined): string {
+  const label = (clientName ?? "")
+    .toLowerCase()
+    .replace(/[^a-z0-9-]+/g, "-")
+    .replace(/-+/g, "-")
+    .replace(/^-|-$/g, "")
+    .slice(0, 32)
+    .replace(/-+$/, "");
+  return RESERVED_LABELS.includes(label) ? "" : label;
+}
 
 async function tokenMatches(given: string, expectedHex: string): Promise<boolean> {
   const a = await sha256(given);
@@ -75,7 +135,7 @@ async function authorize(request: Request, env: AppEnv, cfg: Config): Promise<Re
     authReq.responseType !== "code" ||
     !client ||
     !authReq.codeChallenge ||
-    !cfg.oauthRedirectUris.includes(authReq.redirectUri) ||
+    !redirectAllowed(authReq.redirectUri, cfg.oauthRedirectUris) ||
     !client.redirectUris.includes(authReq.redirectUri)
   ) {
     return page(400, "Invalid request", "This authorization request is not valid.");
@@ -102,13 +162,25 @@ async function authorize(request: Request, env: AppEnv, cfg: Config): Promise<Re
     return new Response(null, { status: 302, headers: { location: redirectTo, "cache-control": "no-store" } });
   }
 
-  const form = `<form method="post"><label>Access token<input type="password" name="token" autocomplete="off" required autofocus></label><label>Label<input type="text" name="label" autocomplete="off" required maxlength="32" pattern="[a-z0-9][a-z0-9\-]{0,31}"></label><button type="submit">Authorize</button></form>`;
+  const form = `<form method="post"><label>Access token<input type="password" name="token" autocomplete="off" required autofocus></label><label>Label<input type="text" name="label" autocomplete="off" required maxlength="32" pattern="[a-z0-9][a-z0-9\-]{0,31}" value="${escapeHtml(prefillLabel(client.clientName))}"></label><button type="submit">Authorize</button></form>`;
   return page(200, "Sign in", `Authorize <strong>${escapeHtml(client.clientName ?? "this client")}</strong> to use this server.`, form);
+}
+
+/** 401 for `/mcp` without credentials: empty body, a challenge naming the resource metadata. */
+function unauthorized(cfg: Config): Response {
+  return new Response(null, {
+    status: 401,
+    headers: {
+      "www-authenticate": `Bearer realm="OAuth", resource_metadata="${cfg.publicUrl}/.well-known/oauth-protected-resource/mcp"`,
+      "cache-control": "no-store",
+    },
+  });
 }
 
 export function createHandler(opts: HandlerOptions = {}): ExportedHandler<Env> {
   const mailerFactory = opts.mailerFactory ?? smtpMailer;
   const limiterName = opts.limiterName ?? "global";
+  const authenticate = opts.authenticate;
 
   const apiHandler = {
     async fetch(request: Request, env: AppEnv, ctx: ExecutionContext<Props>): Promise<Response> {
@@ -153,12 +225,6 @@ export function createHandler(opts: HandlerOptions = {}): ExportedHandler<Env> {
         resourceMetadata: { resource: `${cfg.publicUrl}/mcp` },
         // Auth failures on /mcp carry no body, only the challenge header.
         onError: ({ status, headers }) => (status === 401 ? new Response(null, { status, headers }) : undefined),
-        resolveExternalToken: async ({ token, env }) => {
-          const current = parseConfig(env as unknown as Record<string, unknown>);
-          if (!(await tokenMatches(token, current.authTokenSha256))) return null;
-          const props: Props = { fp: await fingerprint(current), label: "bearer" };
-          return { props, audience: `${current.publicUrl}/mcp` };
-        },
       });
       providers.set(cfg.publicUrl, p);
     }
@@ -176,6 +242,14 @@ export function createHandler(opts: HandlerOptions = {}): ExportedHandler<Env> {
         return new Response(null, { status: 500 });
       }
       const { pathname } = new URL(request.url);
+      // TEST SEAM: when a harness supplies `authenticate`, /mcp is guarded here
+      // instead of by the OAuth provider. Production never sets it.
+      if (authenticate && pathname === "/mcp") {
+        const who = await authenticate(request, env);
+        if (!who) return unauthorized(cfg);
+        const props: Props = { fp: await fingerprint(cfg), label: who.label };
+        return apiHandler.fetch(request, env as AppEnv, { props } as unknown as ExecutionContext<Props>);
+      }
       if (request.method === "POST" && (pathname === "/authorize" || pathname === "/register")) {
         const kind = pathname === "/authorize" ? "signin" : "register";
         const e = env as AppEnv;

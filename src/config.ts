@@ -30,6 +30,8 @@ export interface Config {
 export const DEFAULT_REDIRECT_URIS = [
   "https://client.example.test/callback",
   "https://secondary.example.test/callback",
+  // The a hosted MCP client connector chooses its own callback path, so allow the host.
+  "vendor.example",
 ];
 
 export class ConfigError extends Error {
@@ -135,6 +137,17 @@ function webUrl(key: string, raw: string): URL {
   return u;
 }
 
+/**
+ * A bare-hostname allowlist entry (no scheme, path, query or port), matched
+ * against a redirect URI's host by `redirectAllowed()`. Requiring at least one
+ * dot keeps stray words and typos out of the allowlist.
+ */
+const BARE_HOST = /^(?=.{1,253}$)(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/i;
+
+export function isBareHostname(entry: string): boolean {
+  return BARE_HOST.test(entry);
+}
+
 export function parseConfig(env: Record<string, unknown>): Config {
   // EMAIL_BATCHING is reserved: deliberately never read.
   const authTokenSha256 = required(env, "MCP_AUTH_TOKEN_SHA256");
@@ -174,8 +187,8 @@ export function parseConfig(env: Record<string, unknown>): Config {
 
   const redirectRaw = str(env, "OAUTH_REDIRECT_URIS");
   const oauthRedirectUris = redirectRaw === undefined ? DEFAULT_REDIRECT_URIS : redirectRaw.split(",").map((u) => u.trim()).filter(Boolean);
-  if (!oauthRedirectUris.length) throw new ConfigError("OAUTH_REDIRECT_URIS", "must list at least one URL");
-  for (const u of oauthRedirectUris) webUrl("OAUTH_REDIRECT_URIS", u);
+  if (!oauthRedirectUris.length) throw new ConfigError("OAUTH_REDIRECT_URIS", "must list at least one URL or hostname");
+  for (const u of oauthRedirectUris) if (!isBareHostname(u)) webUrl("OAUTH_REDIRECT_URIS", u);
 
   return {
     authTokenSha256,

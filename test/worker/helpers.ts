@@ -7,9 +7,27 @@
 // * `FakeMailer` replaces SMTP. It records every `OutgoingEmail` the
 //   Worker hands to the mailer, and can be told to fail.
 // * `worker(vars)` builds a fresh handler via `createHandler({ mailerFactory,
-//   limiterName })` with a unique rate-limiter name, so each test gets its
-//   own bucket. Requests go through the handler's real `fetch`, i.e. through
-//   the OAuth provider, the auth checks and the MCP transport.
+//   limiterName, authenticate })` with a unique rate-limiter name, so each
+//   test gets its own bucket. Requests go through the handler's real `fetch`.
+//
+// There is no static bearer path any more: `/mcp` is only reachable with an
+// OAuth grant. Tool suites must therefore not mint OAuth tokens (that is the
+// provider suites' job). Instead they use the `authenticate` TEST SEAM on
+// `createHandler`: when supplied, the handler authenticates `/mcp` itself,
+// from the request, and calls the MCP handler directly. `worker()` installs a
+// seam that reads this harness's own header:
+//
+//   x-mcp-test-label: <label>
+//
+// The label defaults to TEST_LABEL ("tester"); `rpc`/`sendEmail`/`ping` take
+// an explicit label so a test can act as several connections. The seam sees
+// every `/mcp` request this harness makes, including the no-credentials case
+// that the real provider would answer with 401.
+//
+// `worker(vars, { oauth: true })` does NOT install the seam, so `/mcp` goes
+// through the real OAuth provider. Use it only for provider tests
+// (discovery, registration, /authorize, /token, grant fingerprints): the
+// helpers' `rpc`/`sendEmail`/`ping` do not work on such a worker.
 //
 // Wire conventions (MCP Streamable HTTP, stateless): `POST /mcp`,
 // `Content-Type: application/json`, `Accept: application/json,
@@ -39,6 +57,11 @@ export const DEFAULT_TO = "inbox@example.net";
 export const OFF_LIST = "mallory@evil.example";
 /** Distinctive rate, searched for in responses. */
 export const PER_MIN = "37";
+
+/** Label the harness acts as when a test does not name one. */
+export const TEST_LABEL = "tester";
+/** Request header the test seam reads to pick the connection label. */
+export const LABEL_HEADER = "x-mcp-test-label";
 
 export type Vars = Record<string, string>;
 
@@ -101,25 +124,43 @@ export const SMTP_FAILURE = `550 5.1.1 mailbox unavailable (relay ${SMTP_HOST} r
 // Worker harness
 // ---------------------------------------------------------------------------
 
+export interface WorkerOptions {
+  limiterName?: string;
+  mailer?: FakeMailer;
+  /** Do not install the test seam; let the real OAuth provider guard /mcp. */
+  oauth?: boolean;
+}
+
 export interface TestWorker {
   mailer: FakeMailer;
   vars: Vars;
   fetch(path: string, init?: RequestInit): Promise<Response>;
-  /** Authenticated JSON-RPC; returns the whole envelope. */
-  rpc(method: string, params?: unknown, bearerToken?: string): Promise<any>;
-  sendEmail(to: string, subject: string, body: string): Promise<any>;
-  ping(args?: Record<string, unknown>): Promise<any>;
-  listTools(): Promise<any>;
+  /** JSON-RPC as the connection labelled `label` (default TEST_LABEL). */
+  rpc(method: string, params?: unknown, label?: string): Promise<any>;
+  sendEmail(to: string, subject: string, body: string, label?: string): Promise<any>;
+  ping(args?: Record<string, unknown>, label?: string): Promise<any>;
+  listTools(label?: string): Promise<any>;
 }
+
+/** The `authenticate` seam the handler accepts but does not export a type for. */
+type Seam = (request: Request, env: Env) => Promise<{ label: string } | null>;
 
 let nextId = 1;
 
-export function worker(vars: Vars = baseVars(), opts: { limiterName?: string; mailer?: FakeMailer } = {}): TestWorker {
+export function worker(vars: Vars = baseVars(), opts: WorkerOptions = {}): TestWorker {
   const mailer = opts.mailer ?? new FakeMailer();
-  const handler = createHandler({
+  // `authenticate` is a production change the implementor adds to
+  // HandlerOptions; the local intersection type keeps the test tree
+  // typechecking before that lands without hiding a typo in the option name
+  // once it does (the structural shape is asserted by every tool suite).
+  const handlerOptions: NonNullable<Parameters<typeof createHandler>[0]> & { authenticate?: Seam } = {
     mailerFactory: () => mailer,
     limiterName: opts.limiterName ?? crypto.randomUUID(),
-  });
+  };
+  if (!opts.oauth) {
+    handlerOptions.authenticate = async (request) => ({ label: request.headers.get(LABEL_HEADER)?.trim() || TEST_LABEL });
+  }
+  const handler = createHandler(handlerOptions);
   const testEnv = { ...env, ...vars } as unknown as Env;
 
   const doFetch = async (path: string, init?: RequestInit) => {
@@ -133,22 +174,22 @@ export function worker(vars: Vars = baseVars(), opts: { limiterName?: string; ma
     mailer,
     vars,
     fetch: doFetch,
-    async rpc(method, params = {}, bearerToken = TOKEN) {
+    async rpc(method, params = {}, label = TEST_LABEL) {
       const id = nextId++;
-      const res = await doFetch("/mcp", mcpInit({ jsonrpc: "2.0", id, method, params }, bearerToken));
+      const res = await doFetch("/mcp", mcpInitAs({ jsonrpc: "2.0", id, method, params }, label));
       expect(res.status, `JSON-RPC ${method} should be HTTP 200`).toBe(200);
       const envelope = await parseRpc(res);
       expect(envelope.id).toBe(id);
       return envelope;
     },
-    sendEmail(to, subject, body) {
-      return self.rpc("tools/call", { name: "send_email", arguments: { to, subject, body } });
+    sendEmail(to, subject, body, label = TEST_LABEL) {
+      return self.rpc("tools/call", { name: "send_email", arguments: { to, subject, body } }, label);
     },
-    ping(args = {}) {
-      return self.rpc("tools/call", { name: "ping", arguments: args });
+    ping(args = {}, label = TEST_LABEL) {
+      return self.rpc("tools/call", { name: "ping", arguments: args }, label);
     },
-    async listTools() {
-      const e = await self.rpc("tools/list");
+    async listTools(label = TEST_LABEL) {
+      const e = await self.rpc("tools/list", {}, label);
       expect(e.error, JSON.stringify(e)).toBeUndefined();
       return e.result;
     },
@@ -156,6 +197,7 @@ export function worker(vars: Vars = baseVars(), opts: { limiterName?: string; ma
   return self;
 }
 
+/** MCP request authenticated by a real OAuth access token (provider tests only). */
 export function mcpInit(body: unknown, bearerToken?: string | null, extra: Record<string, string> = {}): RequestInit {
   const headers: Record<string, string> = {
     "content-type": "application/json",
@@ -165,6 +207,11 @@ export function mcpInit(body: unknown, bearerToken?: string | null, extra: Recor
   };
   if (bearerToken) headers.authorization = `Bearer ${bearerToken}`;
   return { method: "POST", headers, body: JSON.stringify(body) };
+}
+
+/** MCP request authenticated by the test seam as `label`. */
+export function mcpInitAs(body: unknown, label: string = TEST_LABEL, extra: Record<string, string> = {}): RequestInit {
+  return mcpInit(body, null, { [LABEL_HEADER]: label, ...extra });
 }
 
 export async function parseRpc(res: Response): Promise<any> {

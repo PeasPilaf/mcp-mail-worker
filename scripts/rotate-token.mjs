@@ -13,5 +13,5 @@ if (r.status !== 0) {
   process.exit(1);
 }
 console.log(`New token (shown only this time):\n\n${token}\n`);
-console.log("Paste it on the vendor.example sign-in page, or use it as the the model Code bearer token.");
+console.log("Paste it on a client's sign-in page when it asks you to authorize the connection.");
 console.log("Every previously connected client must sign in again.");

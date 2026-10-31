@@ -26,7 +26,9 @@
 // | MAX_BODY_BYTES      | no       | integer >= 0; absent = no cap                               |
 // | CLIENT_EMAIL_PER_MIN| no       | integer > 0; per-connection cap ON TOP of EMAIL_PER_MIN;     |
 //                                  absent = no per-connection cap (`clientEmailPerMin: null`)
-// | OAUTH_REDIRECT_URIS | no       | comma list of https URLs; default = vendor.example/vendor.example     |
+// | OAUTH_REDIRECT_URIS | no       | comma list of https URLs OR bare hostnames  |
+//                                  (http allowed only on localhost/127.0.0.1); default =
+//                                  vendor.example + vendor.example callbacks + vendor.example  |
 // | EMAIL_BATCHING      | no       | RESERVED: read, never validated, never acted on             |
 //
 // Empty strings count as absent. Non-string values (bindings) are ignored.
@@ -128,6 +130,16 @@ describe("happy path", () => {
     expect(parseConfig(varsWith({ CLIENT_EMAIL_PER_MIN: "4" })).clientEmailPerMin).toBe(4);
     expect(parseConfig(varsWith({ OAUTH_REDIRECT_URIS: " https://a.example/cb , http://localhost:9999/cb ," })).oauthRedirectUris)
       .toEqual(["https://a.example/cb", "http://localhost:9999/cb"]);
+    // A bare hostname is an allowlist entry: any path on exactly that host.
+    expect(parseConfig(varsWith({ OAUTH_REDIRECT_URIS: "vendor.example" })).oauthRedirectUris).toEqual(["vendor.example"]);
+    expect(parseConfig(varsWith({ OAUTH_REDIRECT_URIS: "https://a.example/cb, vendor.example" })).oauthRedirectUris)
+      .toEqual(["https://a.example/cb", "vendor.example"]);
+  });
+
+  it("default redirect allowlist covers the model and the a hosted MCP client connector", () => {
+    expect([...DEFAULT_REDIRECT_URIS].sort()).toEqual(
+      ["vendor.example", "https://client.example.test/callback", "https://secondary.example.test/callback"].sort(),
+    );
   });
 
   it("ignores non-string bindings in env", () => {
@@ -200,8 +212,8 @@ describe("loud failures", () => {
     expect(err(varsWith({ MAIL_DEFAULT_TO: "nope" })).key).toBe("MAIL_DEFAULT_TO");
   });
 
-  it("redirect uris must be https URLs without fragments", () => {
-    for (const bad of ["not a url", "http://a.example/cb", ",", "https://a.example/cb#frag"]) {
+  it("redirect uris must be https URLs, loopback http, or bare hostnames", () => {
+    for (const bad of ["not a url", "http://a.example/cb", ",", "https://a.example/cb#frag", "vendor.example/cb"]) {
       expect(err(varsWith({ OAUTH_REDIRECT_URIS: bad })).key, bad).toBe("OAUTH_REDIRECT_URIS");
     }
   });

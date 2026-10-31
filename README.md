@@ -109,8 +109,11 @@ The token authorizes signing in and nothing else. It is not an MCP
 credential: `/mcp` accepts only a connection's own OAuth token, so this
 token can never send mail by itself, whatever header carries it.
 
-Sign-in attempts and OAuth client registrations are each limited to 10 in
-any 60 seconds; extra requests get `429`.
+Sign-in failures and OAuth client registrations are each limited to 10 per
+client IP in any 60 seconds; extra requests get `429`. The windows are per IP
+rather than global, so one anonymous client cannot exhaust the operator's
+budget, and the sign-in window counts only *failed* tokens — knowing the
+token means never being locked out by it.
 
 ## Connections
 

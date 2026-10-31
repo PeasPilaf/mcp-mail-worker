@@ -22,13 +22,11 @@
 
 import { describe, expect, it } from "vitest";
 import { redirectAllowed } from "../../src/index";
-import { DEFAULT_REDIRECT_URIS } from "../../src/config";
 
-const CLAUDE = "https://client.example.test/callback";
-const CLAUDE_COM = "https://secondary.example.test/callback";
-const CHATGPT = "https://vendor.example/connector_platform_oauth_redirect";
-/** The production default: three exact callbacks, no bare hosts. */
-const DEFAULT = DEFAULT_REDIRECT_URIS;
+const CALLBACK = "https://client.example.test/callback";
+const CALLBACK_2 = "https://secondary.example.test/callback";
+/** A representative allowlist: two exact callbacks plus one bare host. */
+const DEFAULT = [CALLBACK, CALLBACK_2, "vendor.example"];
 
 describe("redirectAllowed: loopback http", () => {
   it("allows localhost and 127.0.0.1 on any port and any path", () => {
@@ -62,15 +60,22 @@ describe("redirectAllowed: loopback http", () => {
 
 describe("redirectAllowed: https allowlist", () => {
   it("matches a full-URL entry exactly", () => {
-    expect(redirectAllowed(CLAUDE, DEFAULT)).toBe(true);
-    expect(redirectAllowed(CLAUDE_COM, DEFAULT)).toBe(true);
-    expect(redirectAllowed(CLAUDE, [CLAUDE])).toBe(true);
+    expect(redirectAllowed(CALLBACK, DEFAULT)).toBe(true);
+    expect(redirectAllowed(CALLBACK_2, DEFAULT)).toBe(true);
+    expect(redirectAllowed(CALLBACK, [CALLBACK])).toBe(true);
   });
 
   it("matches a bare-hostname entry on that hostname and no other", () => {
-    expect(redirectAllowed("https://vendor.example/connector/oauth/callback", ["vendor.example"])).toBe(true);
+    expect(redirectAllowed("https://vendor.example/oauth/callback", DEFAULT)).toBe(true);
     expect(redirectAllowed("https://vendor.example/", ["vendor.example"])).toBe(true);
     expect(redirectAllowed("https://vendor.example/mcp/oauth/cb?x=1", ["vendor.example"])).toBe(true);
+  });
+
+  it("a configured bare host matches its default port only", () => {
+    expect(redirectAllowed("https://vendor.example/cb", ["vendor.example"])).toBe(true);
+    expect(redirectAllowed("https://vendor.example:443/cb", ["vendor.example"])).toBe(true);
+    expect(redirectAllowed("https://vendor.example:8443/cb", ["vendor.example"])).toBe(false);
+    expect(redirectAllowed("http://vendor.example/cb", ["vendor.example"])).toBe(false);
   });
 
   it("does not match subdomains, prefixes or suffixes of a bare host", () => {
@@ -89,28 +94,28 @@ describe("redirectAllowed: https allowlist", () => {
     for (const uri of [
       "https://client.example.test/callback/extra",
       "https://client.example.test/callback2",
-      "https://vendor.example.evil.net/api/mcp/auth_callback",
+      "https://client.example.test.evil.net/callback",
       "https://evil.example/https://client.example.test/callback",
-      "https://vendor.example/API/mcp/auth_callback",
+      "https://client.example.test/CALLBACK",
     ]) {
       expect(redirectAllowed(uri, DEFAULT), uri).toBe(false);
     }
   });
 
   it("normalises scheme and host case through the URL parser", () => {
-    expect(redirectAllowed("HTTPS://a hosted MCP client.com/cb", ["vendor.example"])).toBe(true);
-    expect(redirectAllowed("https://the model.AI/api/mcp/auth_callback", [CLAUDE])).toBe(true);
+    expect(redirectAllowed("HTTPS://Vendor.Example/cb", ["vendor.example"])).toBe(true);
+    expect(redirectAllowed("https://Client.Example.test/callback", [CALLBACK])).toBe(true);
   });
 
   it("only honours the allowlist it is given", () => {
-    expect(redirectAllowed(CLAUDE, [])).toBe(false);
-    expect(redirectAllowed(CLAUDE, [CLAUDE_COM])).toBe(false);
+    expect(redirectAllowed(CALLBACK, [])).toBe(false);
+    expect(redirectAllowed(CALLBACK, [CALLBACK_2])).toBe(false);
   });
 });
 
 describe("redirectAllowed: refusals", () => {
   it("rejects http on a non-loopback host, even an allowlisted one", () => {
-    for (const uri of ["http://vendor.example/cb", "http://vendor.example/api/mcp/auth_callback", "http://evil.example/cb"]) {
+    for (const uri of ["http://vendor.example/cb", "http://client.example.test/callback", "http://evil.example/cb"]) {
       expect(redirectAllowed(uri, DEFAULT), uri).toBe(false);
     }
   });
@@ -123,7 +128,7 @@ describe("redirectAllowed: refusals", () => {
 
   it("rejects credentials in the URL", () => {
     for (const uri of [
-      "https://user:pass@vendor.example/api/mcp/auth_callback",
+      "https://user:pass@client.example.test/callback",
       "https://user@vendor.example/cb",
       "http://user:pass@localhost:1234/cb",
     ]) {
@@ -132,7 +137,7 @@ describe("redirectAllowed: refusals", () => {
   });
 
   it("rejects fragments", () => {
-    for (const uri of [`${CLAUDE}#frag`, "https://vendor.example/cb#", "http://localhost:1234/cb#done"]) {
+    for (const uri of [`${CALLBACK}#frag`, "https://vendor.example/cb#", "http://localhost:1234/cb#done"]) {
       expect(redirectAllowed(uri, DEFAULT), uri).toBe(false);
     }
   });
@@ -141,38 +146,5 @@ describe("redirectAllowed: refusals", () => {
     for (const uri of ["", "vendor.example", "vendor.example/cb", "/callback", "not a url", "://bad"]) {
       expect(redirectAllowed(uri, DEFAULT), JSON.stringify(uri)).toBe(false);
     }
-  });
-});
-
-// The default allowlist names a hosted MCP client's exact connector callback, not the
-// vendor.example host. A host-wide entry would let any vendor.example page that
-// leaks its URL (open redirect, Referer, user content) receive an
-// authorization code for a client the attacker registered and holds the
-// PKCE verifier for. A bare-host entry, when an operator configures one,
-// also never vouches for a non-default port.
-describe("redirectAllowed: a hosted MCP client is an exact callback by default", () => {
-  it("allows the a hosted MCP client connector callback", () => {
-    expect(DEFAULT).toContain(CHATGPT);
-    expect(DEFAULT).not.toContain("vendor.example");
-    expect(redirectAllowed(CHATGPT, DEFAULT)).toBe(true);
-  });
-
-  it("refuses every other vendor.example URL", () => {
-    for (const uri of [
-      "https://vendor.example/",
-      "https://vendor.example/g/anything",
-      "https://vendor.example/connector/oauth/callback",
-      `${CHATGPT}?x=1`,
-      `${CHATGPT}/extra`,
-      "https://vendor.example:8443/connector_platform_oauth_redirect",
-    ]) {
-      expect(redirectAllowed(uri, DEFAULT), uri).toBe(false);
-    }
-  });
-
-  it("a configured bare host matches its default port only", () => {
-    expect(redirectAllowed("https://vendor.example/cb", ["vendor.example"])).toBe(true);
-    expect(redirectAllowed("https://vendor.example:443/cb", ["vendor.example"])).toBe(true);
-    expect(redirectAllowed("https://vendor.example:8443/cb", ["vendor.example"])).toBe(false);
   });
 });

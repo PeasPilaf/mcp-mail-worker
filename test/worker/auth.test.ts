@@ -35,7 +35,7 @@
 //   * The sign-in page: `X-Frame-Options: DENY`, CSP with
 //     `frame-ancestors 'none'`, a password field named `token`, method POST,
 //     no configured values in it. No `form-action 'self'` (browsers apply it
-//     to the post-submit redirect and it would block the hop to vendor.example).
+//     to the post-submit redirect and it would block the hop to the client).
 //   * Client labels. Every connection has a label, so mail and limits can be
 //     attributed to it:
 //       - The sign-in page also asks for a label (text input name="label"),
@@ -100,7 +100,7 @@ async function challenge(v: string) {
   return btoa(String.fromCharCode(...d)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
-async function register(w: TestWorker, redirectUris: string[], clientName = "the model") {
+async function register(w: TestWorker, redirectUris: string[], clientName = "Example App") {
   return w.fetch("/register", {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -108,7 +108,7 @@ async function register(w: TestWorker, redirectUris: string[], clientName = "the
   });
 }
 
-async function clientId(w: TestWorker, redirect = CALLBACK, clientName = "the model") {
+async function clientId(w: TestWorker, redirect = CALLBACK, clientName = "Example App") {
   const r = await register(w, [redirect], clientName);
   expect(r.status).toBe(201);
   return ((await r.json()) as any).client_id as string;
@@ -262,7 +262,7 @@ describe("authorize page", () => {
     const csp = r.headers.get("content-security-policy") ?? "";
     expect(csp).toContain("frame-ancestors 'none'");
     const fa = csp.split(";").map((s) => s.trim()).find((d) => d.startsWith("form-action"));
-    if (fa) expect(fa, "form-action would block the redirect").toContain("https://vendor.example");
+    if (fa) expect(fa, "form-action would block the redirect").toContain("https://client.example.test");
     const html = await r.text();
     expect(html).toMatch(/type="password"/);
     expect(html).toMatch(/name="token"/);
@@ -334,9 +334,10 @@ describe("authorize page", () => {
     }
   });
 
-  it("allows the redirects the rule permits: loopback and the default a hosted MCP client callback", async () => {
-    const w = worker();
-    for (const redirect of ["http://localhost:33418/callback", "http://127.0.0.1:8976/oauth/done", "https://vendor.example/connector_platform_oauth_redirect"]) {
+  it("allows the redirects the new rule permits: loopback and allowlisted bare hosts", async () => {
+    // Hosted callbacks are opt-in, so the bare host has to be configured.
+    const w = worker(varsWith({ OAUTH_REDIRECT_URIS: "https://client.example.test/callback,vendor.example" }));
+    for (const redirect of ["http://localhost:33418/callback", "http://127.0.0.1:8976/oauth/done", "https://vendor.example/connector/oauth/callback"]) {
       const cid = await clientId(w, redirect);
       const r = await w.fetch(`/authorize?${await authorizeQuery(cid, redirect)}`);
       expect(r.status, redirect).toBe(200);
@@ -380,8 +381,8 @@ describe("authorize page", () => {
     const w = worker(varsWith({ OAUTH_REDIRECT_URIS: "https://custom.example/cb" }));
     const custom = await clientId(w, "https://custom.example/cb");
     expect((await w.fetch(`/authorize?${await authorizeQuery(custom, "https://custom.example/cb")}`)).status).toBe(200);
-    const model = await clientId(w);
-    expect((await w.fetch(`/authorize?${await authorizeQuery(model)}`, { redirect: "manual" })).status).toBe(400);
+    const client = await clientId(w);
+    expect((await w.fetch(`/authorize?${await authorizeQuery(client)}`, { redirect: "manual" })).status).toBe(400);
     // A bare-host entry covers any path on that host, still no look-alikes.
     const hosted = worker(varsWith({ OAUTH_REDIRECT_URIS: "custom.example" }));
     const ok = await clientId(hosted, "https://custom.example/any/path");

@@ -22,9 +22,9 @@
 //   nothing else in the subject changes.
 // * From is cfg.smtpFrom. Exactly one recipient, no cc/bcc.
 //
-// SMTP (the mail provider via worker-mailer): port 465 -> `secure: true` (implicit TLS);
+// SMTP (via worker-mailer): port 465 -> `secure: true` (implicit TLS);
 // 587 -> `secure: false, startTls: true`. Credentials from config,
-// authType "plain" (the mail provider supports PLAIN/LOGIN), socket and response
+// authType "plain", socket and response
 // timeouts SMTP_TIMEOUT_MS (30 s).
 //
 // Errors surfaced to the LLM pass through `redactConfigValues`, which

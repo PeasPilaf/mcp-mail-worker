@@ -26,14 +26,15 @@ export interface Config {
   oauthRedirectUris: string[];
 }
 
-/** Redirect URIs allowed when OAUTH_REDIRECT_URIS is unset. */
-export const DEFAULT_REDIRECT_URIS = [
-  "https://client.example.test/callback",
-  "https://secondary.example.test/callback",
-  // The a hosted MCP client connector (apps/MCP) callback. Exact URL, not the whole host:
-  // a host-wide entry lets any vendor.example page that leaks its URL receive codes.
-  "https://vendor.example/connector_platform_oauth_redirect",
-];
+/**
+ * Hosted redirect URIs allowed when OAUTH_REDIRECT_URIS is unset: none.
+ * Loopback callbacks (`http://localhost:*`, `http://127.0.0.1:*`) are always
+ * allowed, which is enough for desktop and CLI clients. A hosted callback is a
+ * vendor-specific URL, so this instance ships no default: list the exact
+ * callback URLs you need in OAUTH_REDIRECT_URIS. An empty list is valid and
+ * means "loopback only".
+ */
+export const DEFAULT_REDIRECT_URIS: string[] = [];
 
 export class ConfigError extends Error {
   constructor(
@@ -188,7 +189,8 @@ export function parseConfig(env: Record<string, unknown>): Config {
 
   const redirectRaw = str(env, "OAUTH_REDIRECT_URIS");
   const oauthRedirectUris = redirectRaw === undefined ? DEFAULT_REDIRECT_URIS : redirectRaw.split(",").map((u) => u.trim()).filter(Boolean);
-  if (!oauthRedirectUris.length) throw new ConfigError("OAUTH_REDIRECT_URIS", "must list at least one URL or hostname");
+  // An empty list is valid: loopback callbacks are always allowed, so an
+  // instance that only serves local clients needs no hosted entries at all.
   for (const u of oauthRedirectUris) if (!isBareHostname(u)) webUrl("OAUTH_REDIRECT_URIS", u);
 
   return {

@@ -49,8 +49,8 @@ const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1"]);
 /**
  * Whether `/authorize` may redirect to `redirectUri`. Loopback http is always
  * allowed (native apps); an https URI must equal an allowlisted full URL or be
- * on an allowlisted bare host (default port only). Matching is exact: no prefix or subdomain
- * matching, so a look-alike host never receives a code.
+ * on an allowlisted bare host (default port only). Matching is exact: no prefix
+ * or subdomain matching, so a look-alike host never receives a code.
  */
 export function redirectAllowed(redirectUri: string, allowlist: string[]): boolean {
   // A fragment is never part of an OAuth redirect; reject it before parsing

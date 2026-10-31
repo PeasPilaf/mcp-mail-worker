@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Write-only, rate-limited, recipient-constrained email capability exposed to the model as an MCP server on Cloudflare Workers.",
+  "description": "Write-only, rate-limited, recipient-constrained email capability exposed to an LLM as an MCP server on Cloudflare Workers.",
   "scripts": {
     "test": "vitest run",
     "typecheck": "tsc --noEmit",

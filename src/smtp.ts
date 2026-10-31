@@ -1,4 +1,4 @@
-// SMTP delivery (the mail provider) over Cloudflare TCP sockets, via worker-mailer.
+// SMTP delivery over Cloudflare TCP sockets, via worker-mailer.
 
 import { WorkerMailer, type EmailOptions, type WorkerMailerOptions } from "worker-mailer";
 import type { Config, Mailbox } from "./config";

@@ -4,7 +4,7 @@
 // * `baseVars()` is the canonical configuration. Its values are deliberately
 //   distinctive so suites can grep responses for them and prove that no
 //   configuration value ever reaches the LLM.
-// * `FakeMailer` replaces SMTP. It records every `OutgoingEmail` the
+// * `FakeMailer` replaces SMTP delivery. It records every `OutgoingEmail` the
 //   Worker hands to the mailer, and can be told to fail.
 // * `worker(vars)` builds a fresh handler via `createHandler({ mailerFactory,
 //   limiterName, authenticate })` with a unique rate-limiter name, so each
@@ -75,6 +75,8 @@ export function baseVars(): Vars {
     SMTP_PASSWORD: PASSWORD,
     SMTP_FROM: FROM,
     EMAIL_PER_MIN: PER_MIN,
+    // Hosted callbacks are opt-in now; loopback needs no entry.
+    OAUTH_REDIRECT_URIS: "https://client.example.test/callback",
     MAIL_ALLOW_TO: `${ALICE},${BOB},${DEFAULT_TO}`,
     MAIL_DEFAULT_TO: DEFAULT_TO,
   };

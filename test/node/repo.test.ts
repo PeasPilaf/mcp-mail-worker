@@ -29,7 +29,7 @@
 //   valid configuration, says values are server-side and never reach the
 //   LLM, and marks EMAIL_BATCHING `# Not implemented; read but ignored.`
 // * README.md documents every key, the repository secrets to create, and
-//   how to run the deploy workflow and connect the model, and says that
+//   how to run the deploy workflow and connect a client, and says that
 //   runtime values are set in Cloudflare, not GitHub.
 
 import { existsSync, readFileSync } from "node:fs";
@@ -227,7 +227,7 @@ describe("README", () => {
   it("documents keys, secrets, deploy and connecting", () => {
     const lower = read("README.md").toLowerCase();
     for (const k of [...CONFIG_KEYS, "CLOUDFLARE_API_TOKEN", "CLOUDFLARE_ACCOUNT_ID"]) expect(lower, k).toContain(k.toLowerCase());
-    for (const n of ["npm run clients", "x-mcp-client", "rotate-token", "wrangler login", "wrangler secret put", "variables and secrets", "production", "not in github", "run workflow", "smtp", "app-specific password", "custom connector", "add the MCP server", "send_email", "ping", "durable object", "does not"]) {
+    for (const n of ["npm run clients", "x-mcp-client", "rotate-token", "wrangler login", "wrangler secret put", "variables and secrets", "production", "not in github", "run workflow", "smtp", "app-specific password", "custom connector", "send_email", "ping", "durable object", "does not"]) {
       expect(lower, n).toContain(n);
     }
   });

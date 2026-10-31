@@ -1,11 +1,13 @@
-# mcp-mail
+# mcp-mail-worker
 
-A Cloudflare Worker that gives the model a **write-only, rate-limited,
-recipient-constrained** email capability as an MCP server, sending through
-your the mail provider mailbox.
+A Cloudflare Worker that gives an LLM **write-only, rate-limited,
+recipient-constrained** email capability as an MCP server, sending through your
+own SMTP mailbox.
 
-the model can send mail and check that the service is up. It cannot read mail,
-change settings, or find out which recipients are allowed.
+Any MCP client that speaks OAuth 2.1 with PKCE can connect; nothing here is
+tied to one model or vendor. The model can send mail and check that the service
+is up. It cannot read mail, change settings, or find out which recipients are
+allowed.
 
 ## What the model sees
 
@@ -31,13 +33,13 @@ ping(check_mail?, client_time?)        -> JSON health/timing report
    Anything else, including text that isn't an address, goes to
    `MAIL_DEFAULT_TO` instead. That message gets a `[MCP mail gateway]` banner
    naming the intended recipient and an `X-MCP-Redirected-To` header.
-4. **Send** through SMTP: port 465 with implicit TLS, or 587 with
-   STARTTLS; 30 s timeout. An SMTP failure returns an internal error whose
-   text has every configured value replaced by `[redacted]`.
+4. **Send** over SMTP: port 465 with implicit TLS, or 587 with STARTTLS; 30 s
+   timeout. An SMTP failure returns an internal error whose text has every
+   configured value replaced by `[redacted]`.
 
 `ping` returns `status`, `client` (the connection's label), `server_time`,
 the Cloudflare `colo` and `handler_ms`. Pass `client_time` (ISO 8601) to get
-`received_after_ms`. Pass `check_mail: true` to connect and log in to the mail provider
+`received_after_ms`. Pass `check_mail: true` to connect and log in to SMTP
 without sending, which reports `mail.ok` and `mail.ms` and costs one
 rate-limit token.
 
@@ -54,7 +56,7 @@ rate-limit token.
 
 Every value is a Worker **secret**, set in Cloudflare and nowhere else:
 not in GitHub, not in `wrangler.jsonc`, and never visible to the model.
-Set them in the dashboard (Workers & Pages → `mcp-mail` → Settings →
+Set them in the dashboard (Workers & Pages → `mcp-mail-worker` → Settings →
 Variables and Secrets, type *Secret*) or with `npx wrangler secret put NAME`.
 Secrets survive every deploy. Use the *Secret* type, not plain-text
 variables, because `wrangler deploy` replaces plain-text variables with the
@@ -63,24 +65,24 @@ variables, because `wrangler deploy` replaces plain-text variables with the
 | Key | Required | Meaning |
 |---|---|---|
 | `MCP_AUTH_TOKEN_SHA256` | yes | SHA-256 (64 lowercase hex) of the operator token, which authorizes sign-in only. Set only by `npm run rotate-token` (see [The operator token](#the-operator-token)). |
-| `PUBLIC_URL` | yes | The Worker's https origin, `https://example.aroundand.in`. |
-| `SMTP_HOST` | yes | SMTP host for your region/plan: `smtp.example.com`, `smtp.example.eu`, `smtp.example.in`, `smtp.example.com`, … |
+| `PUBLIC_URL` | yes | The Worker's https origin, e.g. `https://example.aroundand.in`. |
+| `SMTP_HOST` | yes | Your SMTP provider's host, e.g. `smtp.example.com`. |
 | `SMTP_PORT` | no (465) | `465` (implicit TLS) or `587` (STARTTLS). Cloudflare blocks port 25. |
-| `SMTP_USERNAME` | yes | Your the mail provider address. |
-| `SMTP_PASSWORD` | yes | A the mail provider **app-specific password** (the mail provider Accounts → Security → App passwords), not your login password. |
-| `SMTP_FROM` | no | Sender, e.g. `the model <you@yourdomain>`. Defaults to `SMTP_USERNAME`. the mail provider requires it to be your address or an alias. |
+| `SMTP_USERNAME` | yes | The SMTP account's address. |
+| `SMTP_PASSWORD` | yes | An SMTP **app-specific password**, not the account's login password. |
+| `SMTP_FROM` | no | Sender, e.g. `Mail Relay <you@yourdomain>`. Defaults to `SMTP_USERNAME`, which must be an address your provider accepts as a sender. |
 | `EMAIL_PER_MIN` | yes | Bucket size and refill rate per minute (> 0). |
 | `CLIENT_EMAIL_PER_MIN` | no | Per-connection cap (see [Connections](#connections)), on top of `EMAIL_PER_MIN`. Unset = no per-connection cap. |
 | `MAIL_ALLOW_TO` | yes | Comma-separated bare addresses the model may email. |
 | `MAIL_DEFAULT_TO` | no | Where everything else goes. Must be on the allowlist; defaults to its first entry. |
 | `MAX_BODY_BYTES` | no | Body size cap in bytes. Unset = no cap. |
-| `OAUTH_REDIRECT_URIS` | no | Redirect allowlist for the sign-in page: comma-separated https URLs or bare hostnames. Defaults to the exact vendor.example, vendor.example and a hosted MCP client connector callbacks. Loopback http is always allowed (see [Connect the model](#connect-model)). |
+| `OAUTH_REDIRECT_URIS` | no | Hosted redirect allowlist for the sign-in page: comma-separated https URLs or bare hostnames. Unset = none, so only loopback callbacks work. Prefer the exact callback URL over a bare hostname (see [Connect a client](#connect-a-client)). |
 | `EMAIL_BATCHING` | no | Reserved. Read but ignored. |
 
 If a value is missing or invalid, every request gets an empty `500`, and
 `npx wrangler tail` shows which key is wrong (never its value). After
 changing settings, have the model call `ping` with `check_mail: true` to check
-the the mail provider login.
+the SMTP login.
 
 ## The operator token
 
@@ -114,10 +116,10 @@ any 60 seconds; extra requests get `429`.
 
 Every client signs in once with the operator token and chooses a **label**,
 such as `personal` or `work` (lowercase letters, digits and `-`, up to 32
-characters). The sign-in page pre-fills it from the client's name —
-`Example Desktop` becomes `example-desktop` — and the field stays editable, so
-you can accept the suggestion or type your own. Connections made before
-labels existed count as `operator`, a reserved label nobody can claim.
+characters). The sign-in page pre-fills it from the client's self-declared
+name — `Example Desktop` becomes `example-desktop` — and the field stays
+editable, so you can accept the suggestion or type your own. Connections made
+before labels existed count as `operator`, a reserved label nobody can claim.
 
 - Every email carries an `X-MCP-Client: <label>` header, and `ping` reports
   the same label as `client`.
@@ -141,8 +143,8 @@ Cloudflare can read them. Tests run in a separate job with no secrets.
    API Tokens → Custom token, with:
    - Account → *Workers Scripts: Edit*, *Workers KV Storage: Edit*,
      *Account Settings: Read*, limited to your account;
-   - Zone → *Workers Routes: Edit* and *Zone: Read*, limited to the
-     `aroundand.in` zone (for the custom domain).
+   - Zone → *Workers Routes: Edit* and *Zone: Read*, limited to the zone you
+     will serve the Worker from (for the custom domain).
 
    Note your account ID.
 2. **GitHub environment.** In the repository, go to Settings → Environments
@@ -163,32 +165,27 @@ Cloudflare can read them. Tests run in a separate job with no secrets.
 
 Re-run the workflow only when the code changes.
 
-## Connect the model
+## Connect a client
 
 Every client signs in through OAuth; there is no header or static token to
 configure. On the sign-in page, paste the operator token once and confirm
 the pre-filled label. The client then holds its own short-lived OAuth
 tokens, and the model never sees them.
 
-- **vendor.example / the model apps:** Settings → Connectors → Add custom connector,
-  URL `https://example.aroundand.in/mcp`. The sign-in page opens from there.
-- **the model Code:** `add the MCP server --transport http mail
-  https://example.aroundand.in/mcp`, then authenticate with `/mcp`; the
-  browser opens the sign-in page.
-- **MCP Inspector:** start it, connect to the same URL over HTTP, and it
-  opens the sign-in page in your browser.
+Add `https://example.aroundand.in/mcp` as a custom connector or MCP server in
+your client, then complete the sign-in page it opens. A desktop or CLI client
+usually catches the callback on a loopback address and needs no further
+configuration.
 
 The sign-in page only redirects to an allowed callback, decided in two parts.
 **Loopback** addresses — `http://localhost:*` and `http://127.0.0.1:*`, any
-port and path — are always allowed, which is how desktop tools like the model
-Code and MCP Inspector catch the code. **https** callbacks must match
-`OAUTH_REDIRECT_URIS`: by default the vendor.example callback, the vendor.example
-callback, and the a hosted MCP client connector callback
-(`https://vendor.example/connector_platform_oauth_redirect`), all exact. An entry
-is either a full URL, matched exactly, or a bare hostname, which matches any
-path on exactly that host and its default port (not its subdomains). Prefer
-full URLs: a bare host trusts every page on that site. Any other redirect is
-refused with a `400` and is never followed.
+port and path — are always allowed, which is how desktop and CLI clients
+catch the code. **https** callbacks must match `OAUTH_REDIRECT_URIS`, which is
+empty by default. An entry is either a full URL, matched exactly, or a bare
+hostname, which matches any path on exactly that host (not its subdomains).
+Prefer the exact callback URL: a bare hostname also allows user-content paths
+on that host, and a code delivered there could be read by a page you did not
+intend. Any other redirect is refused with a `400` and is never followed.
 
 A client that can only send a fixed header token, with no interactive
 sign-in step, cannot connect.

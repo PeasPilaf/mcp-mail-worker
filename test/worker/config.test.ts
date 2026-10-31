@@ -15,10 +15,10 @@
 //                                  The token itself is never stored anywhere server-side; it is
 //                                  generated and set by `npm run rotate-token` (test/node).
 // | PUBLIC_URL          | yes      | https origin (http only for localhost/127.0.0.1); no path   |
-// | SMTP_HOST           | yes      | e.g. smtp.example.com / smtp.example.eu / smtp.example.com         |
+// | SMTP_HOST           | yes      | your provider's SMTP host                                   |
 // | SMTP_PORT           | no       | 465 (default, implicit TLS) or 587 (STARTTLS); nothing else |
 // | SMTP_USERNAME       | yes      |                                                             |
-// | SMTP_PASSWORD       | yes      | the mail provider app-specific password                                  |
+// | SMTP_PASSWORD       | yes      | SMTP app-specific password                                  |
 // | SMTP_FROM           | no       | mailbox (display name allowed); default = SMTP_USERNAME     |
 // | EMAIL_PER_MIN       | yes      | integer > 0                                                 |
 // | MAIL_ALLOW_TO       | yes      | comma-separated BARE addresses, non-empty                   |
@@ -28,7 +28,7 @@
 //                                  absent = no per-connection cap (`clientEmailPerMin: null`)
 // | OAUTH_REDIRECT_URIS | no       | comma list of https URLs OR bare hostnames  |
 //                                  (http allowed only on localhost/127.0.0.1); default =
-//                                  vendor.example, vendor.example, vendor.example exact callbacks|
+//                                  none (loopback callbacks only)                 |
 // | EMAIL_BATCHING      | no       | RESERVED: read, never validated, never acted on             |
 //
 // Empty strings count as absent. Non-string values (bindings) are ignored.
@@ -84,7 +84,7 @@ describe("happy path", () => {
     expect(c.allowlist.size).toBe(3);
     expect(c.defaultTo).toEqual({ address: DEFAULT_TO });
     expect(c.maxBodyBytes).toBeNull();
-    expect(c.oauthRedirectUris).toEqual(DEFAULT_REDIRECT_URIS);
+    expect(c.oauthRedirectUris).toEqual(["https://client.example.test/callback"]);
   });
 
   it("defaults", () => {
@@ -136,10 +136,9 @@ describe("happy path", () => {
       .toEqual(["https://a.example/cb", "vendor.example"]);
   });
 
-  it("default redirect allowlist covers the model and the a hosted MCP client connector", () => {
-    expect([...DEFAULT_REDIRECT_URIS].sort()).toEqual(
-      ["https://vendor.example/connector_platform_oauth_redirect", "https://client.example.test/callback", "https://secondary.example.test/callback"].sort(),
-    );
+  it("defaults to an empty hosted allowlist (loopback only)", () => {
+    expect(DEFAULT_REDIRECT_URIS).toEqual([]);
+    expect(parseConfig(varsWithout("OAUTH_REDIRECT_URIS")).oauthRedirectUris).toEqual([]);
   });
 
   it("ignores non-string bindings in env", () => {
@@ -213,7 +212,7 @@ describe("loud failures", () => {
   });
 
   it("redirect uris must be https URLs, loopback http, or bare hostnames", () => {
-    for (const bad of ["not a url", "http://a.example/cb", ",", "https://a.example/cb#frag", "vendor.example/cb"]) {
+    for (const bad of ["not a url", "http://a.example/cb", "https://a.example/cb#frag", "vendor.example/cb"]) {
       expect(err(varsWith({ OAUTH_REDIRECT_URIS: bad })).key, bad).toBe("OAUTH_REDIRECT_URIS");
     }
   });

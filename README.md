@@ -109,8 +109,20 @@ The token authorizes signing in and nothing else. It is not an MCP
 credential: `/mcp` accepts only a connection's own OAuth token, so this
 token can never send mail by itself, whatever header carries it.
 
-Sign-in attempts and OAuth client registrations are each limited to 10 in
-any 60 seconds; extra requests get `429`.
+Sign-in failures and OAuth client registrations are each limited to 10 per
+client IP in any 60 seconds; extra requests get `429`. The windows are per IP
+rather than global, so one anonymous client cannot exhaust the operator's
+budget, and the sign-in window counts only *failed* tokens — knowing the
+token means never being locked out by it. Each window lives in a Durable
+Object instance keyed by client IP.
+
+Per-IP windows do not stop a *distributed* client, and `POST /register` is not
+authenticated: every registration is one KV write (1,000 per day on the Free
+plan), so many source addresses could exhaust the write budget and break token
+refresh until the daily reset. If that matters for your deployment, add a
+Cloudflare WAF rate-limiting rule on `POST /register` and `POST /authorize` —
+it is a dashboard setting, not code, and it is the only layer that sees the
+request before the Worker runs.
 
 ## Connections
 

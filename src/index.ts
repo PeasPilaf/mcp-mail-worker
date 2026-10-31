@@ -40,8 +40,27 @@ async function sha256(s: string): Promise<Uint8Array> {
 const LABEL_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
 const RESERVED_LABELS = ["operator"];
 
-/** Sign-in / registration attempts allowed per minute, each. */
+/**
+ * Sign-in failures / registration attempts allowed per minute, per client IP.
+ * The window is keyed on the IP precisely so one anonymous client cannot spend
+ * the operator's whole budget: a single global window per kind would itself be
+ * an availability attack, 429-ing every sign-in and registration (including
+ * the operator's own) for a minute at a time. Only failed tokens count towards
+ * the sign-in window, so a correct token still works while an IP is capped.
+ * There is deliberately no global backstop instance: it would reintroduce the
+ * shared bucket, and floods are absorbed by WAF / plan-level limits anyway.
+ */
 export const AUTH_ATTEMPTS_PER_MIN = 10;
+
+/**
+ * Client address an auth window is keyed on. Cloudflare sets `cf-connecting-ip`
+ * at the edge and overwrites any client-supplied value, so it is trustworthy;
+ * requests without it (only possible off the edge, e.g. tests) share the
+ * literal "unknown" window because the Worker has no other address to key on.
+ */
+function clientIp(request: Request): string {
+  return request.headers.get("cf-connecting-ip") ?? "unknown";
+}
 
 /** Plain http is only for RFC 8252 native-app loopback callbacks. */
 const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1"]);
@@ -124,7 +143,7 @@ function page(status: number, title: string, message: string, form = ""): Respon
 }
 
 /** Sign-in page: the operator types the operator token once to approve a client. */
-async function authorize(request: Request, env: AppEnv, cfg: Config): Promise<Response> {
+async function authorize(request: Request, env: AppEnv, cfg: Config, limiterName: string): Promise<Response> {
   let authReq;
   try {
     authReq = await env.OAUTH_PROVIDER.parseAuthRequest(request);
@@ -146,6 +165,11 @@ async function authorize(request: Request, env: AppEnv, cfg: Config): Promise<Re
     const form = await request.formData().catch(() => null);
     const given = form?.get("token");
     if (typeof given !== "string" || !(await tokenMatches(given, cfg.authTokenSha256))) {
+      // Only a wrong token spends a failure slot; correct tokens, label errors
+      // and GETs are free, so the window can never lock out a client that knows
+      // the token. Over the cap the caller gets no chance to guess again.
+      const limiter = env.RATE_LIMITER.get(env.RATE_LIMITER.idFromName(`${limiterName}:signin:${clientIp(request)}`));
+      if (!(await limiter.take(AUTH_ATTEMPTS_PER_MIN))) return page(429, "Sign in", "Too many failed attempts, try again in a minute.");
       return page(401, "Sign in", "Incorrect token.");
     }
     const label = form?.get("label");
@@ -206,7 +230,7 @@ export function createHandler(opts: HandlerOptions = {}): ExportedHandler<Env> {
   const defaultHandler: ExportedHandler<AppEnv> = {
     async fetch(request: Request, env: AppEnv) {
       const { pathname } = new URL(request.url);
-      if (pathname === "/authorize") return authorize(request, env, parseConfig(env as unknown as Record<string, unknown>));
+      if (pathname === "/authorize") return authorize(request, env, parseConfig(env as unknown as Record<string, unknown>), limiterName);
       return new Response("Not found", { status: 404 });
     },
   };
@@ -251,12 +275,14 @@ export function createHandler(opts: HandlerOptions = {}): ExportedHandler<Env> {
         const props: Props = { fp: await fingerprint(cfg), label: who.label };
         return apiHandler.fetch(request, env as AppEnv, { props } as unknown as ExecutionContext<Props>);
       }
-      if (request.method === "POST" && (pathname === "/authorize" || pathname === "/register")) {
-        const kind = pathname === "/authorize" ? "signin" : "register";
+      // Registration is a failure-prone anonymous POST, so its window is per IP
+      // and taken before the provider registers anything. Sign-in is limited
+      // inside `authorize` instead, after the token check: successful sign-ins
+      // and label errors must not spend a slot (see AUTH_ATTEMPTS_PER_MIN).
+      if (request.method === "POST" && pathname === "/register") {
         const e = env as AppEnv;
-        const limiter = e.RATE_LIMITER.get(e.RATE_LIMITER.idFromName(`${limiterName}:${kind}`));
+        const limiter = e.RATE_LIMITER.get(e.RATE_LIMITER.idFromName(`${limiterName}:register:${clientIp(request)}`));
         if (!(await limiter.take(AUTH_ATTEMPTS_PER_MIN))) {
-          if (kind === "signin") return page(429, "Sign in", "Too many attempts, try again in a minute.");
           return new Response(null, { status: 429, headers: { "retry-after": "60" } });
         }
       }

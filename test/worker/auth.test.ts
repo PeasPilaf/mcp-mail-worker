@@ -65,12 +65,22 @@
 //         Unset -> only the global window applies.
 //   * Grants carry a fingerprint of MCP_AUTH_TOKEN_SHA256; rotating the
 //     token makes every previously issued OAuth token fail with 401.
-//   * Brute-force / spam limits: POST /authorize (every sign-in attempt,
-//     right or wrong) and POST /register each have their own global
-//     limit of AUTH_ATTEMPTS_PER_MIN (10) in any 60 s, held in the
-//     RateLimiter Durable Object. Over the limit -> 429, never a redirect,
-//     no code, no client registered. GET /authorize (showing the page) is
-//     not limited. These limits are separate from the email limit.
+//   * Brute-force / spam limits are PER CLIENT IP (`cf-connecting-ip`,
+//     falling back to the literal "unknown" when the header is absent), so
+//     one anonymous client cannot spend somebody else's budget. Each kind
+//     has its own windows, held in the RateLimiter Durable Object:
+//       - POST /register: a flat AUTH_ATTEMPTS_PER_MIN (10) per 60 s per IP.
+//       - POST /authorize: only FAILED token attempts count, 10 per 60 s
+//         per IP. The window is consulted on the wrong-token branch only,
+//         so a successful sign-in, a label error (400 page) and a plain GET
+//         of the page never consume a slot; a correct token signs in even
+//         when that IP has spent its failures (it is not a failure).
+//     Over the limit -> 429, never a redirect, no code, no client
+//     registered. GET /authorize is not limited. These limits are separate
+//     from the email limit.
+//     A single GLOBAL window per kind would be an availability attack on
+//     the operator: one anonymous client could 429 every sign-in and every
+//     registration, locking the operator out of their own server.
 //   * Every route answers 500 with an empty body when the configuration is
 //     invalid, before doing anything else.
 //
@@ -92,6 +102,12 @@ const LIST = { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} };
 const LIMIT = "email rate limit exceeded for this minute";
 const RM = `${PUBLIC}/.well-known/oauth-protected-resource`;
 
+/** Header naming the client IP each auth window is keyed on. */
+const IP_HEADER = "cf-connecting-ip";
+/** Two documentation-range addresses (RFC 5737): distinct client IPs. */
+const IP_A = "198.51.100.10";
+const IP_B = "203.0.113.20";
+
 /** Worker whose /mcp is guarded by the real OAuth provider (no test seam). */
 const providerWorker = (vars = baseVars()) => worker(vars, { oauth: true });
 
@@ -100,12 +116,19 @@ async function challenge(v: string) {
   return btoa(String.fromCharCode(...d)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
 }
 
-async function register(w: TestWorker, redirectUris: string[], clientName = "Example App") {
+/** POST /register from client IP `ip`; null sends no header (the "unknown" fallback bucket). */
+async function registerFrom(w: TestWorker, ip: string | null, redirectUris: string[], clientName = "Example App") {
+  const headers: Record<string, string> = { "content-type": "application/json" };
+  if (ip !== null) headers[IP_HEADER] = ip;
   return w.fetch("/register", {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers,
     body: JSON.stringify({ client_name: clientName, redirect_uris: redirectUris, token_endpoint_auth_method: "none", grant_types: ["authorization_code", "refresh_token"], response_types: ["code"] }),
   });
+}
+
+async function register(w: TestWorker, redirectUris: string[], clientName = "Example App") {
+  return registerFrom(w, null, redirectUris, clientName);
 }
 
 async function clientId(w: TestWorker, redirect = CALLBACK, clientName = "Example App") {
@@ -121,15 +144,22 @@ async function authorizeQuery(cid: string, redirect = CALLBACK) {
   }).toString();
 }
 
-async function submit(w: TestWorker, query: string, token: string, label: string | null = "personal") {
+/** POST the sign-in form from client IP `ip`; null sends no header (the "unknown" fallback bucket). */
+async function submitFrom(w: TestWorker, ip: string | null, query: string, token: string, label: string | null = "personal") {
   const form = new URLSearchParams({ token });
   if (label !== null) form.set("label", label);
+  const headers: Record<string, string> = { "content-type": "application/x-www-form-urlencoded" };
+  if (ip !== null) headers[IP_HEADER] = ip;
   return w.fetch(`/authorize?${query}`, {
     method: "POST",
-    headers: { "content-type": "application/x-www-form-urlencoded" },
+    headers,
     body: form.toString(),
     redirect: "manual",
   });
+}
+
+async function submit(w: TestWorker, query: string, token: string, label: string | null = "personal") {
+  return submitFrom(w, null, query, token, label);
 }
 
 async function getCode(w: TestWorker, cid: string, label = "personal") {
@@ -447,48 +477,178 @@ describe("hashed token", () => {
 });
 
 describe("sign-in and registration limits", () => {
+  // A single GLOBAL window per kind would be an availability attack on the
+  // operator: one anonymous client could spend it and 429 every sign-in and
+  // every registration, locking the operator out of their own server. The
+  // budget must therefore be per client IP. A request's IP is the
+  // `cf-connecting-ip` header; requests without it all share the literal
+  // "unknown" window, because the Worker has nothing else to key on (the
+  // connection address is overwritten by Cloudflare's edge).
+
   it("is 10 per minute", () => {
     expect(AUTH_ATTEMPTS_PER_MIN).toBe(10);
   });
 
-  it("sign-in attempts are limited, even with the right token", async () => {
+  it("sign-in failure windows are per client IP: one IP exhausting its own does not lock another out", async () => {
     const w = worker();
     const q = await authorizeQuery(await clientId(w));
-    for (let i = 0; i < AUTH_ATTEMPTS_PER_MIN; i++) expect((await submit(w, q, `wrong-${i}`)).status, `attempt ${i}`).toBe(401);
-    const r = await submit(w, q, TOKEN);
-    expect(r.status).toBe(429);
-    expect(r.headers.get("location")).toBeNull();
-    expectNoSecrets(await r.text(), "429 page");
-    // Viewing the page is not an attempt.
-    expect((await w.fetch(`/authorize?${q}`)).status).toBe(200);
+    // IP_A spends its whole failure budget.
+    for (let i = 0; i < AUTH_ATTEMPTS_PER_MIN; i++) {
+      expect((await submitFrom(w, IP_A, q, `wrong-a-${i}`)).status, `IP_A failure ${i}`).toBe(401);
+    }
+    expect((await submitFrom(w, IP_A, q, "wrong-a-10")).status).toBe(429);
+    // IP_B never failed: its failed token is still the ordinary 401 page,
+    // and its correct token still signs in.
+    expect((await submitFrom(w, IP_B, q, "wrong-b")).status).toBe(401);
+    const ok = await submitFrom(w, IP_B, q, TOKEN);
+    expect(ok.status).toBe(302);
+    expect(ok.headers.get("location")).toContain(CALLBACK);
   });
 
-  it("successful sign-ins count too", async () => {
+  it("the 11th failed token from one IP is the 429 page, never a redirect", async () => {
+    const w = worker();
+    const q = await authorizeQuery(await clientId(w));
+    // Ten failed tokens: each is the ordinary 401 page.
+    for (let i = 0; i < AUTH_ATTEMPTS_PER_MIN; i++) {
+      const r = await submitFrom(w, IP_A, q, `wrong-${i}`);
+      expect(r.status, `failure ${i}`).toBe(401);
+      expect(r.headers.get("location"), `failure ${i}`).toBeNull();
+    }
+    // The eleventh failed token is the 429 page: HTML, no Location, no secret.
+    const over = await submitFrom(w, IP_A, q, "wrong-10");
+    expect(over.status).toBe(429);
+    expect(over.headers.get("location")).toBeNull();
+    expect(over.headers.get("content-type") ?? "").toMatch(/^text\/html/);
+    const html = await over.text();
+    expect(html.length).toBeGreaterThan(0);
+    expectNoSecrets(html, "429 page");
+    // And the limit follows the IP, not the bucket: another IP gets the 401 page.
+    expect((await submitFrom(w, IP_B, q, "wrong-b")).status).toBe(401);
+  });
+
+  it("successful sign-ins never consume a failure slot: 12 inside a minute all redirect", async () => {
     const w = worker();
     const cid = await clientId(w);
-    for (let i = 0; i < AUTH_ATTEMPTS_PER_MIN; i++) await getCode(w, cid);
-    expect((await submit(w, await authorizeQuery(cid), TOKEN)).status).toBe(429);
+    for (let i = 0; i < AUTH_ATTEMPTS_PER_MIN + 2; i++) {
+      const r = await submitFrom(w, IP_A, await authorizeQuery(cid), TOKEN);
+      expect(r.status, `success ${i}`).toBe(302);
+      expect(r.headers.get("location"), `success ${i}`).toContain(CALLBACK);
+    }
   });
 
-  it("client registration is limited", async () => {
+  it("failed token attempts, not successful ones, use up the sign-in window", async () => {
     const w = worker();
-    for (let i = 0; i < AUTH_ATTEMPTS_PER_MIN; i++) expect((await register(w, [CALLBACK])).status, `register ${i}`).toBe(201);
-    const r = await register(w, [CALLBACK]);
-    expect(r.status).toBe(429);
-    expect(r.headers.get("location")).toBeNull();
+    const cid = await clientId(w);
+    // Ten valid sign-ins would exhaust an all-attempts window...
+    for (let i = 0; i < AUTH_ATTEMPTS_PER_MIN; i++) {
+      expect((await submitFrom(w, IP_A, await authorizeQuery(cid), TOKEN)).status, `success ${i}`).toBe(302);
+    }
+    // ...but the failure window is untouched: ten failures are still allowed.
+    for (let i = 0; i < AUTH_ATTEMPTS_PER_MIN; i++) {
+      expect((await submitFrom(w, IP_A, await authorizeQuery(cid), `wrong-${i}`)).status, `failure ${i}`).toBe(401);
+    }
+    expect((await submitFrom(w, IP_A, await authorizeQuery(cid), "wrong-10")).status).toBe(429);
   });
 
-  it("buckets are independent of each other and of email", async () => {
+  it("label errors are not failed sign-ins and do not consume the failure window", async () => {
     const w = worker();
-    for (let i = 0; i < AUTH_ATTEMPTS_PER_MIN; i++) await register(w, [CALLBACK]);
-    expect((await register(w, [CALLBACK])).status).toBe(429);
-    // Registration exhausted; a client registered earlier can still sign in.
-    const fresh = worker();
-    const cid = await clientId(fresh);
-    for (let i = 0; i < AUTH_ATTEMPTS_PER_MIN - 1; i++) await register(fresh, [CALLBACK]);
-    expect((await register(fresh, [CALLBACK])).status).toBe(429);
-    await getCode(fresh, cid);
-    expectSent(await fresh.sendEmail(ALICE, "s", "b"));
+    const q = await authorizeQuery(await clientId(w));
+    // The token is right, the label is not: 400 page, no redirect, no slot.
+    for (let i = 0; i < AUTH_ATTEMPTS_PER_MIN; i++) {
+      const r = await submitFrom(w, IP_A, q, TOKEN, "Not A Label");
+      expect(r.status, `label error ${i}`).toBe(400);
+      expect(r.headers.get("location"), `label error ${i}`).toBeNull();
+    }
+    // None of that was a failed token: ten wrong tokens are still allowed.
+    for (let i = 0; i < AUTH_ATTEMPTS_PER_MIN; i++) {
+      expect((await submitFrom(w, IP_A, q, `wrong-${i}`)).status, `failure ${i}`).toBe(401);
+    }
+    expect((await submitFrom(w, IP_A, q, "wrong-10")).status).toBe(429);
+  });
+
+  it("a wrong token followed by the correct token still signs in while under the cap", async () => {
+    const w = worker();
+    const q = await authorizeQuery(await clientId(w));
+    // Nine failures from IP_A: below the ten-failure cap.
+    for (let i = 0; i < AUTH_ATTEMPTS_PER_MIN - 1; i++) {
+      expect((await submitFrom(w, IP_A, q, `wrong-${i}`)).status, `failure ${i}`).toBe(401);
+    }
+    // A failure from another IP does not count against IP_A's window...
+    expect((await submitFrom(w, IP_B, q, "wrong-b")).status).toBe(401);
+    // ...so IP_A's next attempt, with the right token, still redirects.
+    const r = await submitFrom(w, IP_A, q, TOKEN);
+    expect(r.status).toBe(302);
+    expect(r.headers.get("location")).toContain(CALLBACK);
+  });
+
+  it("client registration windows are per IP", async () => {
+    const w = worker();
+    // IP_A registers its ten clients...
+    for (let i = 0; i < AUTH_ATTEMPTS_PER_MIN; i++) {
+      expect((await registerFrom(w, IP_A, [CALLBACK])).status, `register ${i}`).toBe(201);
+    }
+    // ...then gets the empty 429 with a 60 s hint, never a redirect.
+    const over = await registerFrom(w, IP_A, [CALLBACK]);
+    expect(over.status).toBe(429);
+    expect(await over.text()).toBe("");
+    expect(over.headers.get("retry-after")).toBe("60");
+    expect(over.headers.get("location")).toBeNull();
+    // IP_B has its own window: it still registers.
+    const fresh = await registerFrom(w, IP_B, [CALLBACK]);
+    expect(fresh.status).toBe(201);
+    expect(((await fresh.json()) as any).client_id).toBeTruthy();
+  });
+
+  it("registration windows are independent of sign-in and of email", async () => {
+    const w = worker();
+    // Register one client from IP_A, then exhaust IP_A's registration window.
+    const reg = await registerFrom(w, IP_A, [CALLBACK]);
+    expect(reg.status).toBe(201);
+    const cid = ((await reg.json()) as any).client_id as string;
+    for (let i = 0; i < AUTH_ATTEMPTS_PER_MIN - 1; i++) {
+      expect((await registerFrom(w, IP_A, [CALLBACK])).status, `register ${i}`).toBe(201);
+    }
+    expect((await registerFrom(w, IP_A, [CALLBACK])).status).toBe(429);
+    // Sign-in is a different window: IP_A still gets the 401 page and a redirect.
+    expect((await submitFrom(w, IP_A, await authorizeQuery(cid), "wrong")).status).toBe(401);
+    expect((await submitFrom(w, IP_A, await authorizeQuery(cid), TOKEN)).status).toBe(302);
+    // Per IP: another IP still registers...
+    expect((await registerFrom(w, IP_B, [CALLBACK])).status).toBe(201);
+    // ...and the email limit is separate: /mcp still sends.
+    expectSent(await w.sendEmail(ALICE, "s", "b"));
+  });
+
+  it("requests without cf-connecting-ip share the fallback \"unknown\" window", async () => {
+    const w = worker();
+    const q = await authorizeQuery(await clientId(w));
+    // Ten headerless failures all land in one fallback bucket...
+    for (let i = 0; i < AUTH_ATTEMPTS_PER_MIN; i++) {
+      expect((await submitFrom(w, null, q, `wrong-${i}`)).status, `failure ${i}`).toBe(401);
+    }
+    // ...so the next headerless failure is limited...
+    expect((await submitFrom(w, null, q, "wrong-10")).status).toBe(429);
+    // ...while a request that names its IP has its own window.
+    expect((await submitFrom(w, IP_A, q, "wrong-a")).status).toBe(401);
+  });
+
+  it("GET /authorize is never limited, and only failures are", async () => {
+    const w = worker();
+    const q = await authorizeQuery(await clientId(w));
+    for (let i = 0; i < AUTH_ATTEMPTS_PER_MIN; i++) {
+      expect((await submitFrom(w, IP_A, q, `wrong-${i}`)).status, `failure ${i}`).toBe(401);
+    }
+    expect((await submitFrom(w, IP_A, q, "wrong-10")).status).toBe(429);
+    // Rendering the page is not an attempt, however often it is fetched.
+    for (let i = 0; i < 3; i++) {
+      const r = await w.fetch(`/authorize?${q}`);
+      expect(r.status, `GET ${i}`).toBe(200);
+      expect(r.headers.get("content-type") ?? "", `GET ${i}`).toMatch(/^text\/html/);
+      expect(await r.text(), `GET ${i}`).toContain('name="token"');
+    }
+    // The window counts failures only: the correct token still signs in.
+    const ok = await submitFrom(w, IP_A, q, TOKEN);
+    expect(ok.status).toBe(302);
+    expect(ok.headers.get("location")).toContain(CALLBACK);
   });
 });
 
